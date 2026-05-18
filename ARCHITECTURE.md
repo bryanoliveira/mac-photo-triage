@@ -1,0 +1,207 @@
+# Photo Triage — Architecture
+
+## Technology Stack
+
+- **Language**: Swift 5.9+
+- **UI Framework**: SwiftUI (primary) + AppKit interop for image manipulation
+- **Image handling**: CoreImage (filters, rotation, crop), ImageIO (RAW decode), CGImage
+- **Hashing**: vImage (resize for dHash) + custom dHash implementation
+- **Database**: SQLite via GRDB.swift for hash cache + progress state
+- **File operations**: FileManager + NSWorkspace (trash)
+- **Minimum deployment**: macOS 14.0 (Sonoma)
+- **Build system**: Xcode + xcodebuild via `build.sh`
+- **Testing**: XCTest (unit) + XCUITest (UI), via `test.sh`
+
+## Project Structure
+
+```
+PhotoTriage/
+├── build.sh                              # Build script
+├── test.sh                               # Test runner
+├── PhotoTriage.xcodeproj
+├── PhotoTriage/
+│   ├── App/
+│   │   ├── PhotoTriageApp.swift          # Entry point
+│   │   ├── AppState.swift                # Global app state (ObservableObject)
+│   │   └── KeyBindings.swift             # Configurable keyboard shortcuts
+│   ├── Models/
+│   │   ├── ImageAsset.swift              # Single image (or JPEG+RAW pair)
+│   │   ├── ImageFolder.swift             # Loaded folder state
+│   │   ├── SentinelState.swift           # Read/write sentinel files (.keep, .trash, .favorite, .reviewed)
+│   │   ├── SimilarityEngine.swift        # dHash + timestamp ranking
+│   │   ├── HashCache.swift               # SQLite hash persistence
+│   │   └── ProgressStore.swift           # Resume position tracking
+│   ├── Views/
+│   │   ├── Gallery/
+│   │   │   ├── GalleryView.swift         # Resizable grid of thumbnails
+│   │   │   ├── GalleryThumbnail.swift    # Single cell with badges
+│   │   │   └── DetailPanel.swift         # Sidebar: metadata, actions, favorites
+│   │   ├── Preview/
+│   │   │   ├── PreviewView.swift         # Single image preview
+│   │   │   ├── CropOverlay.swift         # Crop rectangle + handles + presets
+│   │   │   └── RotationControls.swift
+│   │   ├── Triage/
+│   │   │   ├── TriageView.swift          # Side-by-side layout
+│   │   │   ├── ComparisonPane.swift      # Single pane (left or right)
+│   │   │   └── TriageControls.swift      # Action buttons bar
+│   │   ├── Shared/
+│   │   │   ├── ImageRenderer.swift       # CIImage → NSImage display
+│   │   │   ├── EXIFOverlay.swift         # Metadata badge
+│   │   │   ├── ZoomableImageView.swift   # Pan + zoom container
+│   │   │   ├── FavoriteButton.swift      # Star toggle (used everywhere)
+│   │   │   └── KeyboardHandler.swift     # Global key event routing (reads KeyBindings)
+│   │   └── Settings/
+│   │       └── ShortcutSettings.swift    # Preferences: rebind keys
+│   ├── Services/
+│   │   ├── ImageLoader.swift             # Async image loading + thumbnail caching
+│   │   ├── RAWDecoder.swift              # RAW → displayable pipeline
+│   │   ├── CropService.swift             # Apply crop to JPEG (backup original)
+│   │   ├── TrashService.swift            # Move to macOS Trash
+│   │   └── UndoService.swift             # Undo/redo stack
+│   └── Utilities/
+│       ├── DHash.swift                   # Perceptual hash algorithm
+│       ├── EXIFReader.swift              # Extract EXIF metadata
+│       └── FileExtensions.swift          # RAW/JPEG extension sets
+├── PhotoTriageTests/
+│   ├── DHashTests.swift
+│   ├── SentinelStateTests.swift
+│   ├── ImageFolderTests.swift
+│   ├── SimilarityEngineTests.swift
+│   └── ProgressStoreTests.swift
+├── PhotoTriageUITests/
+│   ├── GalleryUITests.swift
+│   ├── TriageUITests.swift
+│   └── PreviewUITests.swift
+└── README.md
+```
+
+## Data Flow
+
+```
+Folder Scan
+    │
+    ▼
+ImageFolder (pairs RAW+JPEG, reads sentinels, loads progress)
+    │
+    ▼
+SimilarityEngine (computes/loads dHash, ranks by similarity + time)
+    │
+    ▼
+AppState (current view, anchor, candidate queue, undo stack)
+    │
+    ├──▶ GalleryView (thumbnail grid + detail panel)
+    │
+    ├──▶ TriageView (anchor + best candidate, auto-keep on advance)
+    │
+    └──▶ PreviewView (single image for edit)
+```
+
+## Similarity Engine Detail
+
+```swift
+func findCandidates(for anchor: ImageAsset, in folder: ImageFolder) -> [ImageAsset] {
+    let others = folder.images.filter { $0.id != anchor.id && !$0.isTrashed }
+    
+    return others.sorted { a, b in
+        let scoreA = similarityScore(anchor: anchor, candidate: a)
+        let scoreB = similarityScore(anchor: anchor, candidate: b)
+        return scoreA < scoreB  // lower = more similar
+    }
+}
+
+func similarityScore(anchor: ImageAsset, candidate: ImageAsset) -> Double {
+    let hashDistance = Double(hammingDistance(anchor.dHash, candidate.dHash)) / 256.0  // 0..1
+    let timeDelta = abs(anchor.captureTime - candidate.captureTime)
+    let timeScore = min(timeDelta / 3600.0, 1.0)  // normalize: 1 hour → 1.0
+    
+    // Weight: 70% content similarity, 30% time proximity
+    return hashDistance * 0.7 + timeScore * 0.3
+}
+```
+
+**dHash algorithm**:
+1. Resize image to 17×16 grayscale
+2. Compare adjacent horizontal pixels (left > right = 1, else 0)
+3. Produces 256-bit hash
+4. Hamming distance = number of differing bits
+
+**No threshold**: Always return sorted candidates. Right pane always shows the top candidate.
+
+## Sentinel File Design
+
+Sentinels are zero-byte files. Naming: `<original_filename>.<sentinel_type>`
+
+```
+IMG_1234.JPG
+IMG_1234.JPG.keep       ← marked keep
+IMG_1234.JPG.favorite   ← favorited
+IMG_1234.CR3            ← RAW partner (sentinels mirrored from JPEG)
+```
+
+JPEG sentinel is source of truth for a pair. RAW sentinels mirrored automatically.
+
+**Triage auto-keep**: When user navigates forward from an anchor, `.keep` + `.reviewed` are placed automatically on the current anchor (they decided it's good enough to move on).
+
+## Progress Tracking
+
+Stored in `.photo-triage.db` table `progress`:
+
+```sql
+CREATE TABLE progress (
+    folder_path TEXT PRIMARY KEY,
+    last_triage_index INTEGER,
+    last_preview_index INTEGER,
+    last_gallery_scroll REAL,
+    last_view TEXT,  -- 'gallery' | 'preview' | 'triage'
+    updated_at TEXT
+);
+```
+
+On app launch with a known folder → offer "Resume from image X?" or start fresh.
+
+## Configurable Shortcuts
+
+Stored in UserDefaults (or a plist). `KeyBindings` model maps action IDs to key combos:
+
+```swift
+struct KeyBinding: Codable {
+    let action: String       // e.g. "triage.keepLeft"
+    var key: KeyEquivalent
+    var modifiers: EventModifiers
+}
+```
+
+Settings UI shows a table of actions with editable key fields. Reset-to-defaults button.
+
+## Performance Strategy
+
+- **Thumbnail cache**: 256px thumbnails in `.photo-triage-thumbs/`
+- **Lazy full-res load**: Only when displayed; prefetch ±1
+- **Background hashing**: Concurrent async queue, ~50ms per image on M1
+- **Progressive scan**: UI available immediately; similarity updates as hashes complete
+- **Memory ceiling**: Max 4 full-res images in memory
+
+## Build & Test
+
+**build.sh**:
+```bash
+#!/bin/bash
+set -euo pipefail
+xcodebuild -project PhotoTriage.xcodeproj \
+  -scheme PhotoTriage \
+  -configuration Release \
+  -derivedDataPath ./build \
+  build
+echo "Build output: ./build/Build/Products/Release/PhotoTriage.app"
+```
+
+**test.sh**:
+```bash
+#!/bin/bash
+set -euo pipefail
+xcodebuild -project PhotoTriage.xcodeproj \
+  -scheme PhotoTriage \
+  -configuration Debug \
+  -derivedDataPath ./build \
+  test
+```
