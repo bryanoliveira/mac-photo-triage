@@ -16,9 +16,9 @@
 
 ```
 PhotoTriage/
-├── build.sh                              # Build script
-├── test.sh                               # Test runner
-├── PhotoTriage.xcodeproj
+├── build.sh                              # SPM release build
+├── make-app.sh                           # Build + assemble signed .app bundle
+├── test.sh                               # SPM test runner
 ├── PhotoTriage/
 │   ├── App/
 │   │   ├── PhotoTriageApp.swift          # Entry point
@@ -37,9 +37,9 @@ PhotoTriage/
 │   │   │   ├── GalleryThumbnail.swift    # Single cell with badges
 │   │   │   └── DetailPanel.swift         # Sidebar: metadata, actions, favorites
 │   │   ├── Preview/
-│   │   │   ├── PreviewView.swift         # Single image preview
+│   │   │   ├── PreviewView.swift         # Single image preview + trash action
 │   │   │   ├── CropOverlay.swift         # Crop rectangle + handles + presets
-│   │   │   └── RotationControls.swift
+│   │   │   └── RotationControls.swift    # 90° steps + level panel (−45°/+45° slider, ±0.5° nudge)
 │   │   ├── Triage/
 │   │   │   ├── TriageView.swift          # Side-by-side layout
 │   │   │   ├── ComparisonPane.swift      # Single pane (left or right)
@@ -48,6 +48,7 @@ PhotoTriage/
 │   │   │   ├── ImageRenderer.swift       # CIImage → NSImage display
 │   │   │   ├── EXIFOverlay.swift         # Metadata badge
 │   │   │   ├── ZoomableImageView.swift   # Pan + zoom container
+│   │   │   ├── ClippingOverlay.swift     # Flashing highlight/shadow clipping overlay
 │   │   │   ├── FavoriteButton.swift      # Star toggle (used everywhere)
 │   │   │   └── KeyboardHandler.swift     # Global key event routing (reads KeyBindings)
 │   │   └── Settings/
@@ -57,7 +58,8 @@ PhotoTriage/
 │   │   ├── RAWDecoder.swift              # RAW → displayable pipeline
 │   │   ├── CropService.swift             # Apply crop to JPEG (backup original)
 │   │   ├── TrashService.swift            # Move to macOS Trash
-│   │   └── UndoService.swift             # Undo/redo stack
+│   │   ├── UndoService.swift             # Undo/redo stack
+│   │   └── ClippingAnalyzer.swift        # Background pixel analysis for highlight/shadow masks
 │   └── Utilities/
 │       ├── DHash.swift                   # Perceptual hash algorithm
 │       ├── EXIFReader.swift              # Extract EXIF metadata
@@ -91,7 +93,7 @@ AppState (current view, anchor, candidate queue, undo stack)
     │
     ├──▶ GalleryView (thumbnail grid + detail panel)
     │
-    ├──▶ TriageView (anchor + best candidate, auto-keep on advance)
+    ├──▶ TriageView (anchor + candidate queue; keep-left/both advance candidate, keep-right swaps anchor)
     │
     └──▶ PreviewView (single image for edit)
 ```
@@ -173,6 +175,24 @@ struct KeyBinding: Codable {
 
 Settings UI shows a table of actions with editable key fields. Reset-to-defaults button.
 
+## Clipping Warnings
+
+Toggled via `AppState.showClippingWarnings` (key: W). When active, `ClippingOverlay` is layered inside `ZoomableImageView` / `ControlledZoomableImageView` as an inner `ZStack` sibling of the image, so the overlay automatically tracks zoom and pan.
+
+**`ClippingAnalyzer`** (actor, singleton):
+1. Uses `CGImageSourceCreateThumbnailAtIndex` at ≤1024px — avoids decoding full-res RAW into memory
+2. Renders the thumbnail into a `CGContext` (RGBA premultiplied)
+3. Walks every pixel: channels ≥ 252 → highlight (solid red in mask), channels ≤ 3 → shadow (solid blue in mask)
+4. Creates two transparent `NSImage` masks — one per clipping type
+5. Caches results by URL so repeated toggling or navigation is instant
+
+**`ClippingOverlay`** (SwiftUI view):
+- Displays red mask + blue mask with `.opacity(0.9)` so the original image texture remains faintly visible
+- A `.task` loop flashes the overlay at ~1.4 Hz (700 ms on / 700 ms off) using animated `.opacity` transitions — same visual idiom used by dedicated cameras
+- `allowsHitTesting(false)` so gestures pass through to the image layer
+
+Both panes in Triage mode share the same `showClippingWarnings` flag, making highlight/shadow comparison across two images instant.
+
 ## Performance Strategy
 
 - **Thumbnail cache**: 256px thumbnails in `.photo-triage-thumbs/`
@@ -181,27 +201,44 @@ Settings UI shows a table of actions with editable key fields. Reset-to-defaults
 - **Progressive scan**: UI available immediately; similarity updates as hashes complete
 - **Memory ceiling**: Max 4 full-res images in memory
 
-## Build & Test
+## Keyboard Handling
 
-**build.sh**:
-```bash
-#!/bin/bash
-set -euo pipefail
-xcodebuild -project PhotoTriage.xcodeproj \
-  -scheme PhotoTriage \
-  -configuration Release \
-  -derivedDataPath ./build \
-  build
-echo "Build output: ./build/Build/Products/Release/PhotoTriage.app"
+Key events are intercepted via `NSEvent.addLocalMonitorForEvents(matching: .keyDown)` installed by `KeyMonitorView` (an `NSViewRepresentable` placed in `.background`). Local monitors fire **before** the responder chain — returning `nil` consumes the event (no system beep), returning the original event passes it through. The monitor is installed when the view enters a window and removed when it leaves, so only the currently active view (gallery / preview / triage) handles keys at any time.
+
+`FocusedKeyboardHandler` is a `ViewModifier` that wraps this mechanism and translates raw `NSEvent`s into typed `KeyAction` values using the user's current `KeyBindings`.
+
+## Triage Decision Flow
+
+```
+keepLeft()  → mark anchor .kept, candidate .trash  → advanceToNextCandidate()
+keepBoth()  → mark anchor .kept, candidate .kept   → advanceToNextCandidate()
+keepRight() → mark candidate .kept, anchor .trash  → candidate becomes new anchor, updateCandidates()
+keepNone()  → mark both .trash                     → nextTriageAnchor()
+
+advanceToNextCandidate(skipping: id):
+  1. Rebuild candidate list (excludes trashed images)
+  2. Find first candidate that isn't `id` and isn't already reviewed
+  3. If found → show it (anchor unchanged)
+  4. If none  → nextTriageAnchor()
 ```
 
-**test.sh**:
+## Build & Test
+
+All builds use Swift Package Manager (no `.xcodeproj`).
+
+**build.sh** — release binary only:
 ```bash
-#!/bin/bash
-set -euo pipefail
-xcodebuild -project PhotoTriage.xcodeproj \
-  -scheme PhotoTriage \
-  -configuration Debug \
-  -derivedDataPath ./build \
-  test
+swift build -c release
+# output: .build/release/PhotoTriage
+```
+
+**make-app.sh** — release binary + `.app` bundle + ad-hoc codesign:
+```bash
+./make-app.sh
+# output: PhotoTriage.app  (double-clickable, Dock-compatible)
+```
+
+**test.sh** — unit test suite:
+```bash
+swift test
 ```

@@ -21,25 +21,29 @@ Native macOS app for organizing DSLR photos. Three primary views: **Gallery** (d
 ### Preview Mode
 
 - Display a single image at full resolution (fit-to-window, zoom with scroll/pinch)
-- **Rotate**: Free rotation (drag gesture) + 90° step buttons
+- **Clipping warnings**: Toggle button (W) flashes red over blown highlights (channels ≥ 252/255) and blue over crushed shadows (channels ≤ 3/255). Helps catch exposure problems before deciding to keep or trash.
+- **Rotate**: 90° step buttons (toolbar) + **Level panel** (level icon) with a −45°/+45° slider and ±0.5° nudge buttons for horizon correction
 - **Crop**: Free-form crop + presets:
   - 1:1, 4:3, 3:2, 16:9, 5:4, 2:3, 9:16
   - Custom ratio input
 - Apply/cancel crop with configurable keys (default: Enter / Escape)
+- **Trash**: Send current image to trash and advance to next (Delete key or toolbar button)
 - Navigation: forward/backward through image list
 - Favorite toggle
 - Keyboard shortcut to return to Gallery or Triage
 
 ### Triage Mode
 
+- **Clipping warnings**: Same toggle (W) applies to both anchor and candidate panes simultaneously — flashing red/blue overlays make blown highlights and crushed shadows immediately visible for direct comparison.
 - **Layout**: Two images side-by-side (50/50 split, resizable divider)
 - **Left image** = anchor (current selection)
 - **Right image** = most similar image to anchor (sorted by content similarity + time distance; always shows something — no threshold)
 - **Actions**:
-  - Keep left only → trash right
-  - Keep right only → trash left, right becomes new anchor
-  - Keep both → advance anchor to next unreviewed image
-  - Keep none → trash both, advance to next unreviewed
+  - Keep left → mark anchor kept, trash candidate, load next candidate for same anchor
+  - Keep right → mark candidate kept, trash anchor, candidate becomes new anchor with fresh candidates
+  - Keep both → mark both kept, load next unreviewed candidate for same anchor
+  - Keep none → trash both, advance anchor to next unreviewed image
+  - When no candidates remain for the current anchor, advancing moves to the next anchor automatically
 - **Auto-keep on forward navigation**: Moving to the next anchor (forward) automatically places `.keep` on the current anchor (signals "done with this one")
 - **Navigation**:
   - Next/Previous anchor (configurable, default: ← / →)
@@ -114,6 +118,7 @@ All shortcuts are **configurable** via Preferences. Defaults:
 | Escape | Cancel crop / Return to previous view | Preview |
 | Space | Toggle zoom-to-fit vs 100% | Preview, Triage |
 | I | Toggle EXIF overlay | All |
+| W | Toggle clipping warnings | Preview, Triage |
 | T | Switch to Triage mode | Gallery, Preview |
 | G | Switch to Gallery | Preview, Triage |
 | F | Toggle favorite | All |
@@ -122,6 +127,7 @@ All shortcuts are **configurable** via Preferences. Defaults:
 | ⌘Z | Undo last action | All |
 | ⌘⇧Z | Redo | All |
 | ⌘O | Open folder | All |
+| ⌫ | Trash current image | Preview |
 | ⌘⌫ | Empty trash (execute pending deletes) | All |
 | +/- | Resize gallery grid | Gallery |
 
@@ -132,5 +138,5 @@ All shortcuts are **configurable** via Preferences. Defaults:
 - **No network**: Fully offline, no telemetry, no cloud
 - **Undo**: Full undo stack for triage decisions (marks are just sentinel files, easily reversible)
 - **Window management**: Resizable, supports full-screen, remembers window position
-- **Build**: Single `build.sh` script for command-line build
+- **Build**: `build.sh` for binary-only build; `make-app.sh` to build and assemble a signed `.app` bundle
 - **Tests**: Unit + UI tests, runnable via `test.sh`
