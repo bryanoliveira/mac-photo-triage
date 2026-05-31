@@ -58,24 +58,42 @@ struct GalleryView: View {
 
     @ViewBuilder
     private func gridView(for folder: ImageFolder) -> some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 4) {
-                ForEach(folder.filteredImages) { asset in
-                    GalleryThumbnail(
-                        asset: asset,
-                        isSelected: appState.selectedAsset?.id == asset.id
-                    )
-                    .onTapGesture {
-                        appState.selectedAsset = asset
-                    }
-                    .onTapGesture(count: 2) {
-                        appState.showPreview(for: asset)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 4) {
+                    ForEach(folder.filteredImages) { asset in
+                        GalleryThumbnail(
+                            asset: asset,
+                            isSelected: appState.selectedAsset?.id == asset.id
+                        )
+                        .id(asset.id)
+                        .onTapGesture {
+                            appState.selectedAsset = asset
+                        }
+                        .onTapGesture(count: 2) {
+                            appState.showPreview(for: asset)
+                        }
                     }
                 }
+                .padding(8)
             }
-            .padding(8)
+            .background(Color(NSColor.controlBackgroundColor))
+            .onAppear {
+                scrollToSelected(proxy: proxy)
+            }
+            .onChange(of: appState.currentView) { _, view in
+                if view == .gallery { scrollToSelected(proxy: proxy) }
+            }
         }
-        .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private func scrollToSelected(proxy: ScrollViewProxy) {
+        guard let id = appState.selectedAsset?.id else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(id, anchor: .center)
+            }
+        }
     }
 
     @ViewBuilder
@@ -154,6 +172,11 @@ struct GalleryView: View {
         case .openFolder:
             showingOpenPanel = true
             return true
+        case .emptyTrash:
+            if appState.folder != nil {
+                appState.emptyTrash()
+            }
+            return true
         default:
             return false
         }
@@ -186,6 +209,11 @@ struct GalleryView: View {
 struct GalleryToolbar: View {
     @EnvironmentObject var appState: AppState
     @Binding var showingOpenPanel: Bool
+    @State private var showingEmptyTrashAlert = false
+
+    private var trashedCount: Int {
+        appState.folder?.images.filter { $0.isTrashed }.count ?? 0
+    }
 
     var body: some View {
         HStack {
@@ -196,6 +224,27 @@ struct GalleryToolbar: View {
 
             Divider()
                 .frame(height: 20)
+
+            // Empty trash button
+            if appState.folder != nil {
+                Button(action: { showingEmptyTrashAlert = true }) {
+                    Label("Empty Trash (\(trashedCount))", systemImage: "trash")
+                        .foregroundStyle(trashedCount > 0 ? .red : .secondary)
+                }
+                .disabled(trashedCount == 0)
+                .help("Move all trash-marked images to macOS Trash (⌘⌫)")
+                .alert("Empty Trash?", isPresented: $showingEmptyTrashAlert) {
+                    Button("Move \(trashedCount) image(s) to Trash", role: .destructive) {
+                        appState.emptyTrash()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This moves \(trashedCount) image(s) marked for trash to the macOS Trash. The files can be recovered from Trash before you empty it.")
+                }
+
+                Divider()
+                    .frame(height: 20)
+            }
 
             // Filter picker
             if let folder = appState.folder {

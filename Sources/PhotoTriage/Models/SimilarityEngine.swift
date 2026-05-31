@@ -1,19 +1,21 @@
 import Foundation
 
-/// Candidate image with similarity score
+/// Candidate image with similarity score and per-component breakdown
 struct SimilarityCandidate: Identifiable, Equatable {
     let id: UUID
     let asset: ImageAsset
-    let score: Double      // Lower = more similar
-    let hashDistance: Int  // Hamming distance (0-256)
+    let score: Double           // Lower = more similar
+    let hashDistance: Int       // Hamming distance (0-256)
+    let histogramDistance: Double?  // Color histogram L1 distance (0-1), nil if unavailable
     let timeDistance: TimeInterval  // Seconds between captures
+    let aspectDistance: Double  // Aspect ratio difference (0-1)
 
     var hashDistancePercent: Double {
         Double(hashDistance) / 256.0 * 100
     }
 }
 
-/// Engine for finding similar images using dHash and timestamp proximity
+/// Engine for finding similar images using dHash, color histogram, timestamp, and aspect ratio
 @MainActor
 final class SimilarityEngine: ObservableObject {
     /// Progress of hash computation (0.0 - 1.0)
@@ -25,13 +27,13 @@ final class SimilarityEngine: ObservableObject {
     /// Hash cache for persistence
     private var hashCache: HashCache?
 
-    /// Weight for hash distance in similarity score (0.0 - 1.0)
-    private let hashWeight: Double = 0.7
+    // Scoring weights (must sum to 1.0)
+    // Priority: content similarity > time proximity > aspect ratio
+    private let contentWeight: Double = 0.60   // dHash + histogram
+    private let timeWeight: Double = 0.30
+    private let aspectWeight: Double = 0.10
 
-    /// Weight for time distance in similarity score (0.0 - 1.0)
-    private let timeWeight: Double = 0.3
-
-    /// Time normalization factor (1 hour = 1.0 score)
+    /// Time normalization cap (images taken within this window score best on time)
     private let timeNormalizationHours: Double = 1.0
 
     init() {}
@@ -41,7 +43,7 @@ final class SimilarityEngine: ObservableObject {
         hashCache = try await HashCache(folderURL: folderURL)
     }
 
-    /// Compute hashes for all images in a folder
+    /// Compute hashes, histograms, and dimensions for all images in a folder
     func computeHashes(for folder: ImageFolder) async {
         isComputing = true
         hashProgress = 0
@@ -50,27 +52,53 @@ final class SimilarityEngine: ObservableObject {
         let total = Double(images.count)
 
         for (index, asset) in images.enumerated() {
-            // Check cache first
             if let cached = try? await hashCache?.getHash(for: asset.displayURL) {
+                // Apply cached values
                 asset.dHash = cached.dHash
                 if asset.exifMetadata == nil {
                     asset.exifMetadata = EXIFMetadata(captureDate: cached.captureDate)
                 }
-            } else {
-                // Compute hash
-                let hash = await computeHashAsync(for: asset.displayURL)
-                asset.dHash = hash
 
-                // Load EXIF if not already loaded
+                if let hist = cached.colorHistogram {
+                    asset.colorHistogram = hist
+                    if let w = cached.imageWidth, let h = cached.imageHeight {
+                        asset.imageSize = CGSize(width: w, height: h)
+                    }
+                } else {
+                    // Backfill histogram for records written before this feature
+                    let analysis = await computeAnalysisAsync(for: asset.displayURL)
+                    asset.colorHistogram = analysis?.histogram
+                    asset.imageSize = analysis?.imageSize
+                    try? await hashCache?.storeHash(
+                        cached.dHash,
+                        captureDate: cached.captureDate,
+                        colorHistogram: analysis?.histogram,
+                        imageWidth: analysis.map { Int($0.imageSize.width) },
+                        imageHeight: analysis.map { Int($0.imageSize.height) },
+                        for: asset.displayURL
+                    )
+                }
+            } else {
+                // Cache miss — compute everything
+                async let hashTask = computeHashAsync(for: asset.displayURL)
+                async let analysisTask = computeAnalysisAsync(for: asset.displayURL)
+                let (hash, analysis) = await (hashTask, analysisTask)
+
+                asset.dHash = hash
+                asset.colorHistogram = analysis?.histogram
+                asset.imageSize = analysis?.imageSize
+
                 if asset.exifMetadata == nil {
                     asset.exifMetadata = EXIFReader.read(from: asset.displayURL)
                 }
 
-                // Cache the result
                 if let hash = hash {
                     try? await hashCache?.storeHash(
                         hash,
                         captureDate: asset.captureTime,
+                        colorHistogram: analysis?.histogram,
+                        imageWidth: analysis.map { Int($0.imageSize.width) },
+                        imageHeight: analysis.map { Int($0.imageSize.height) },
                         for: asset.displayURL
                     )
                 }
@@ -82,33 +110,49 @@ final class SimilarityEngine: ObservableObject {
         isComputing = false
     }
 
-    /// Find candidates for an anchor image, sorted by similarity
+    /// Find candidates for an anchor image, sorted by similarity (lower score = more similar)
     func findCandidates(
         for anchor: ImageAsset,
         in folder: ImageFolder,
         excludeTrashed: Bool = true
     ) -> [SimilarityCandidate] {
-        guard let anchorHash = anchor.dHash else { return [] }
-
         let others = folder.images.filter { asset in
             asset.id != anchor.id &&
-            (!excludeTrashed || !asset.isTrashed) &&
-            asset.dHash != nil
+            (!excludeTrashed || !asset.isTrashed)
         }
 
-        let candidates = others.compactMap { asset -> SimilarityCandidate? in
-            guard let hash = asset.dHash else { return nil }
+        let candidates = others.map { asset -> SimilarityCandidate in
+            let hashDist: Int
+            let histDist: Double?
 
-            let hashDistance = DHash.hammingDistance(anchorHash, hash)
+            if let ah = anchor.dHash, let bh = asset.dHash {
+                hashDist = DHash.hammingDistance(ah, bh)
+                histDist = {
+                    guard let h1 = anchor.colorHistogram, let h2 = asset.colorHistogram else { return nil }
+                    return ColorHistogram.distance(h1, h2)
+                }()
+            } else {
+                hashDist = 128  // neutral: no visual info yet, sort by time instead
+                histDist = nil
+            }
+
             let timeDistance = computeTimeDistance(anchor, asset)
-            let score = computeScore(hashDistance: hashDistance, timeDistance: timeDistance)
+            let aspectDistance = computeAspectDistance(anchor, asset)
+            let score = computeScore(
+                hashDistance: hashDist,
+                histogramDistance: histDist,
+                timeDistance: timeDistance,
+                aspectDistance: aspectDistance
+            )
 
             return SimilarityCandidate(
                 id: asset.id,
                 asset: asset,
                 score: score,
-                hashDistance: hashDistance,
-                timeDistance: timeDistance
+                hashDistance: hashDist,
+                histogramDistance: histDist,
+                timeDistance: timeDistance,
+                aspectDistance: aspectDistance
             )
         }
 
@@ -125,34 +169,60 @@ final class SimilarityEngine: ObservableObject {
     private func computeHashAsync(for url: URL) async -> Data? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                let hash = DHash.compute(from: url)
-                continuation.resume(returning: hash)
+                continuation.resume(returning: DHash.compute(from: url))
+            }
+        }
+    }
+
+    private func computeAnalysisAsync(for url: URL) async -> ColorHistogram.Analysis? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: ColorHistogram.analyze(from: url))
             }
         }
     }
 
     private func computeTimeDistance(_ a: ImageAsset, _ b: ImageAsset) -> TimeInterval {
-        guard let timeA = a.captureTime, let timeB = b.captureTime else {
-            return .infinity
-        }
+        guard let timeA = a.captureTime, let timeB = b.captureTime else { return .infinity }
         return abs(timeA.timeIntervalSince(timeB))
     }
 
-    private func computeScore(hashDistance: Int, timeDistance: TimeInterval) -> Double {
-        // Normalize hash distance: 0-256 → 0-1
-        let normalizedHash = Double(hashDistance) / 256.0
+    private func computeAspectDistance(_ a: ImageAsset, _ b: ImageAsset) -> Double {
+        guard let sA = a.imageSize, let sB = b.imageSize,
+              sA.height > 0, sB.height > 0 else { return 0.0 }
+        let arA = Double(sA.width / sA.height)
+        let arB = Double(sB.width / sB.height)
+        let maxAR = max(arA, arB)
+        guard maxAR > 0 else { return 0.0 }
+        return min(abs(arA - arB) / maxAR, 1.0)
+    }
 
-        // Normalize time distance: cap at 1 hour
-        let normalizedTime: Double
-        if timeDistance.isInfinite {
-            normalizedTime = 1.0  // Unknown time gets max time score
+    private func computeScore(
+        hashDistance: Int,
+        histogramDistance: Double?,
+        timeDistance: TimeInterval,
+        aspectDistance: Double
+    ) -> Double {
+        // Content: blend dHash and histogram equally when both available
+        let normalizedHash = Double(hashDistance) / 256.0
+        let contentScore: Double
+        if let histDist = histogramDistance {
+            contentScore = (normalizedHash + histDist) / 2.0
         } else {
-            let hours = timeDistance / 3600.0
-            normalizedTime = min(hours / timeNormalizationHours, 1.0)
+            contentScore = normalizedHash
         }
 
-        // Weighted combination
-        return normalizedHash * hashWeight + normalizedTime * timeWeight
+        // Time proximity: cap at 1 hour
+        let normalizedTime: Double
+        if timeDistance.isInfinite {
+            normalizedTime = 1.0
+        } else {
+            normalizedTime = min(timeDistance / (timeNormalizationHours * 3600.0), 1.0)
+        }
+
+        return contentScore * contentWeight
+             + normalizedTime * timeWeight
+             + aspectDistance * aspectWeight
     }
 }
 

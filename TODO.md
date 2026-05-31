@@ -32,8 +32,10 @@
 - [x] 23. dHash implementation (17×16 grayscale → 256-bit)
 - [x] 24. SQLite hash cache (`.photo-triage.db`)
 - [x] 25. Timestamp extraction from EXIF
-- [x] 26. Candidate ranking (weighted: 70% dHash distance + 30% time proximity)
+- [x] 26. Candidate ranking (three-component weighted score: 60% content similarity, 30% time, 10% aspect ratio)
 - [x] 27. Background hash computation with progress indicator
+- [x] 28b. Color histogram (16-bucket RGB, 64px thumbnail) — improves landscape/mountain photo deduplication
+- [x] 28c. Image dimensions stored per asset — enables orientation-aware ranking (portrait vs landscape)
 
 ## Phase 5: Triage Mode
 - [x] 28. Side-by-side layout with resizable divider
@@ -49,6 +51,7 @@
 
 ## Phase 6: Polish & Integration
 - [x] 38. Trash execution (⌘⌫ → move .trash files to macOS Trash via NSWorkspace)
+- [x] 38b. Empty Trash button in gallery toolbar with confirmation dialog + item count
 - [x] 39. Settings panel (configurable shortcuts, ⌘,)
 - [ ] 40. Window state persistence (position, size, last folder)
 - [x] 41. Resume from last position on folder reopen
@@ -56,6 +59,10 @@
 - [ ] 43. Handle edge cases: empty folder, all reviewed, single image, no JPEG (RAW-only)
 - [ ] 44. Performance testing with 1000+ image folders
 - [ ] 45. App icon + menu bar polish
-- [x] 46. Unit tests (DHash, SentinelState, ImageFolder, SimilarityEngine, ProgressStore, KeyBindings)
+- [x] 46. Unit tests (DHash, ColorHistogram, SentinelState, ImageFolder, SimilarityEngine, ProgressStore, KeyBindings)
 - [ ] 47. UI tests — currently stubbed with XCTSkip; need test image fixture set
 - [ ] 48. Keyboard handler: fix focus so arrow keys work without clicking first (local event monitor in place, verify on real hardware)
+- [x] 49. Timestamps in EXIF/detail panels show seconds (timeStyle .medium)
+- [x] 50. Swap anchor ↔ candidate button in triage toolbar (S key)
+- [x] 51. Guiding grid overlay (rule of thirds + center crosshair) in Preview and Triage (H key); always-on in crop mode
+- [x] 52. Level tool integrated with crop: rotation slider appears in crop view; rotation + crop applied together as a single baked operation

@@ -89,6 +89,12 @@ struct TriageView: View {
         case .toggleClipping:
             appState.showClippingWarnings.toggle()
             return true
+        case .toggleGrid:
+            appState.showGuidingGrid.toggle()
+            return true
+        case .swapPair:
+            appState.swapTriagePair()
+            return true
         case .switchToGallery:
             appState.showGallery()
             return true
@@ -196,11 +202,44 @@ struct TriageToolbar: View {
             Divider()
                 .frame(height: 20)
 
+            // Swap anchor ↔ candidate
+            Button(action: { appState.swapTriagePair() }) {
+                Image(systemName: "arrow.left.arrow.right")
+            }
+            .help("Swap anchor and candidate (S)")
+            .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
+
+            Divider()
+                .frame(height: 20)
+
+            // Candidate filter
+            Picker("", selection: Binding(
+                get: { appState.candidateFilter },
+                set: { appState.candidateFilter = $0 }
+            )) {
+                ForEach(CandidateFilter.allCases) { filter in
+                    Text(filter.rawValue).tag(filter)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 100)
+            .help("Candidate filter: All shows every image; Strict shows near-duplicates only")
+
+            Divider()
+                .frame(height: 20)
+
             // EXIF toggle
             Button(action: { appState.showEXIFOverlay.toggle() }) {
                 Image(systemName: appState.showEXIFOverlay ? "info.circle.fill" : "info.circle")
             }
             .help("Toggle EXIF (I)")
+
+            // Guiding grid toggle
+            Button(action: { appState.showGuidingGrid.toggle() }) {
+                Image(systemName: appState.showGuidingGrid ? "grid" : "grid")
+                    .foregroundStyle(appState.showGuidingGrid ? .blue : .primary)
+            }
+            .help("Toggle guiding grid — rule of thirds + center crosshair (H)")
 
             // Clipping warnings toggle
             Button(action: { appState.showClippingWarnings.toggle() }) {

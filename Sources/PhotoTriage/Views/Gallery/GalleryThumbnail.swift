@@ -39,7 +39,7 @@ struct GalleryThumbnail: View {
                 .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
         )
         .shadow(color: isSelected ? Color.accentColor.opacity(0.3) : .clear, radius: 4)
-        .task(id: asset.displayURL) {
+        .task(id: asset.thumbnailVersion) {
             await loadThumbnail()
         }
     }
@@ -82,6 +82,7 @@ struct GalleryThumbnail: View {
 struct AsyncThumbnail: View {
     let url: URL
     let size: CGFloat
+    var reloadToken: Int = 0
 
     @State private var image: NSImage?
     @State private var isLoading = true
@@ -103,7 +104,7 @@ struct AsyncThumbnail: View {
         .frame(width: size, height: size)
         .background(Color(NSColor.controlBackgroundColor))
         .clipped()
-        .task(id: url) {
+        .task(id: reloadToken) {
             await loadThumbnail()
         }
     }

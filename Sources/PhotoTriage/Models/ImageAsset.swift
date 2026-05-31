@@ -27,8 +27,17 @@ final class ImageAsset: Identifiable, ObservableObject, Equatable, Hashable {
     /// Cached perceptual hash
     @Published var dHash: Data?
 
+    /// 16-bucket × 3-channel RGB color histogram (192 bytes of Float32)
+    @Published var colorHistogram: Data?
+
+    /// Pixel dimensions (read from ImageIO properties — no full decode needed)
+    @Published var imageSize: CGSize?
+
     /// Sentinel state (keep/trash/favorite/reviewed)
     @Published var sentinelState: SentinelState
+
+    /// Incremented after any file edit so thumbnails know to reload from disk
+    @Published var thumbnailVersion: Int = 0
 
     /// Capture timestamp from EXIF (for similarity ranking)
     var captureTime: Date? {

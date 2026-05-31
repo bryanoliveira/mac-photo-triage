@@ -4,21 +4,31 @@ import SwiftUI
 struct PreviewView: View {
     @EnvironmentObject var appState: AppState
 
-    @State private var rotation: Angle = .zero
-    @State private var showRotationPanel = false
     @State private var isCropping = false
+    @State private var zoomResetToken: Int = 0
     @State private var cropRect: CropRect?
     @State private var cropPreset: CropPreset = .free
+    @State private var cropFineRotation: Double = 0
     @State private var imageSize: CGSize = .zero
+    @State private var hasOriginalBackup: Bool = false
+    /// When recropping a previously-edited image, this points to the backup (original) file
+    @State private var cropSourceURL: URL?
+    /// Pixel size of the current (possibly cropped) image, used to initialize the crop rect within the original
+    @State private var cropSizeHint: CGSize?
 
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             PreviewToolbar(
-                rotation: $rotation,
-                showRotationPanel: $showRotationPanel,
                 isCropping: $isCropping,
-                cropPreset: $cropPreset
+                cropPreset: $cropPreset,
+                hasOriginalBackup: hasOriginalBackup,
+                onRotateCCW: { applyRotation(clockwise: false) },
+                onRotateCW:  { applyRotation(clockwise: true) },
+                onEnterCrop: enterCropMode,
+                onApplyCrop: applyCrop,
+                onCancelCrop: cancelCropMode,
+                onRestoreOriginal: restoreOriginal
             )
 
             // Main image view
@@ -26,22 +36,28 @@ struct PreviewView: View {
                 if let asset = appState.previewAsset {
                     if isCropping {
                         CropOverlay(
-                            url: asset.displayURL,
+                            url: cropSourceURL ?? asset.displayURL,
                             cropRect: $cropRect,
                             preset: cropPreset,
-                            imageSize: $imageSize
+                            imageSize: $imageSize,
+                            fineRotation: $cropFineRotation,
+                            initialCropSizeHint: cropSizeHint
                         )
                     } else {
                         ZoomableImageView(
                             url: asset.displayURL,
-                            showClippingWarnings: appState.showClippingWarnings
+                            showClippingWarnings: appState.showClippingWarnings,
+                            reloadToken: appState.cropVersion,
+                            resetZoomToken: zoomResetToken
                         )
-                        .rotationEffect(rotation)
-                            .exifOverlay(
-                                asset.exifMetadata,
-                                isVisible: appState.showEXIFOverlay,
-                                position: .bottomLeading
-                            )
+                        .overlay {
+                            if appState.showGuidingGrid { GuidingGridOverlay() }
+                        }
+                        .exifOverlay(
+                            asset.exifMetadata,
+                            isVisible: appState.showEXIFOverlay,
+                            position: .bottomLeading
+                        )
                     }
 
                     // Favorite button
@@ -56,18 +72,6 @@ struct PreviewView: View {
                         Spacer()
                     }
                     .padding()
-
-                    // Fine rotation panel
-                    if showRotationPanel {
-                        VStack {
-                            Spacer()
-                            RotationControls(rotation: $rotation) {
-                                showRotationPanel = false
-                            }
-                            .padding(.bottom, 16)
-                        }
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
                 } else {
                     Text("No image selected")
                         .foregroundColor(.secondary)
@@ -75,7 +79,6 @@ struct PreviewView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
-            .animation(.easeInOut(duration: 0.2), value: showRotationPanel)
 
             // Navigation bar
             PreviewNavigationBar()
@@ -84,12 +87,16 @@ struct PreviewView: View {
             handleKeyAction(action)
         }
         .onAppear {
-            // Load EXIF if needed
             if let asset = appState.previewAsset, asset.exifMetadata == nil {
                 asset.exifMetadata = EXIFReader.read(from: asset.displayURL)
             }
+            checkBackup()
         }
+        .onChange(of: appState.previewAsset) { _, _ in checkBackup() }
+        .onChange(of: appState.cropVersion) { _, _ in checkBackup() }
     }
+
+    // MARK: - Key handling
 
     private func handleKeyAction(_ action: KeyAction) -> Bool {
         switch action {
@@ -100,19 +107,22 @@ struct PreviewView: View {
             appState.nextPreviewImage()
             return true
         case .rotateCCW:
-            rotation -= .degrees(90)
+            applyRotation(clockwise: false)
             return true
         case .rotateCW:
-            rotation += .degrees(90)
+            applyRotation(clockwise: true)
             return true
         case .toggleZoom:
-            // Handled by ZoomableImageView
-            return false
+            zoomResetToken += 1
+            return true
         case .toggleEXIF:
             appState.showEXIFOverlay.toggle()
             return true
         case .toggleClipping:
             appState.showClippingWarnings.toggle()
+            return true
+        case .toggleGrid:
+            appState.showGuidingGrid.toggle()
             return true
         case .switchToGallery:
             appState.showGallery()
@@ -131,14 +141,11 @@ struct PreviewView: View {
             appState.trashPreviewImage()
             return true
         case .applyCrop:
-            if isCropping {
-                applyCrop()
-            }
+            if isCropping { applyCrop() }
             return true
         case .cancelCrop:
             if isCropping {
-                isCropping = false
-                cropRect = nil
+                cancelCropMode()
             } else {
                 appState.showGallery()
             }
@@ -154,30 +161,110 @@ struct PreviewView: View {
         }
     }
 
-    private func applyCrop() {
-        guard let asset = appState.previewAsset,
-              let crop = cropRect else { return }
+    // MARK: - Actions
 
+    private func enterCropMode() {
+        guard let asset = appState.previewAsset else { return }
+        let service = CropService()
+        let backup = service.backupURL(for: asset.displayURL)
+        if FileManager.default.fileExists(atPath: backup.path) {
+            cropSourceURL = backup
+            cropSizeHint = getImagePixelSize(for: asset.displayURL)
+        } else {
+            cropSourceURL = nil
+            cropSizeHint = nil
+        }
+        isCropping = true
+    }
+
+    private func cancelCropMode() {
+        isCropping = false
+        cropRect = nil
+        cropFineRotation = 0
+        cropSourceURL = nil
+        cropSizeHint = nil
+    }
+
+    /// Read pixel dimensions from image metadata without a full decode (fast).
+    private func getImagePixelSize(for url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    private func applyRotation(clockwise: Bool) {
+        guard let asset = appState.previewAsset else { return }
         Task {
             let service = CropService()
             do {
-                _ = try await service.applyCrop(to: asset.displayURL, cropRect: crop)
-                isCropping = false
-                cropRect = nil
+                _ = try await service.applyRotation(to: asset.displayURL, clockwise: clockwise)
+                appState.recordRotationApplied(to: asset, clockwise: clockwise)
             } catch {
                 appState.errorMessage = error.localizedDescription
             }
         }
     }
+
+    private func applyCrop() {
+        guard let asset = appState.previewAsset,
+              let crop = cropRect else { return }
+
+        let fineRot = cropFineRotation
+        let src = cropSourceURL
+        Task {
+            let service = CropService()
+            do {
+                _ = try await service.applyCrop(to: asset.displayURL, cropRect: crop, rotation: fineRot, sourceURL: src)
+                appState.recordCropApplied(to: asset, cropRect: crop, rotation: fineRot)
+                cancelCropMode()
+            } catch {
+                appState.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func restoreOriginal() {
+        guard let asset = appState.previewAsset else { return }
+        Task {
+            let service = CropService()
+            do {
+                try await service.restoreOriginal(for: asset.displayURL)
+                appState.cropVersion += 1
+                asset.thumbnailVersion += 1
+                hasOriginalBackup = false
+            } catch {
+                appState.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func checkBackup() {
+        guard let asset = appState.previewAsset else {
+            hasOriginalBackup = false
+            return
+        }
+        Task {
+            hasOriginalBackup = await CropService().hasBackup(for: asset.displayURL)
+        }
+    }
 }
+
+// MARK: - Toolbar
 
 /// Preview toolbar with rotation and crop controls
 struct PreviewToolbar: View {
     @EnvironmentObject var appState: AppState
-    @Binding var rotation: Angle
-    @Binding var showRotationPanel: Bool
     @Binding var isCropping: Bool
     @Binding var cropPreset: CropPreset
+    let hasOriginalBackup: Bool
+    var onRotateCCW: () -> Void = {}
+    var onRotateCW: () -> Void = {}
+    var onEnterCrop: () -> Void = {}
+    var onApplyCrop: () -> Void = {}
+    var onCancelCrop: () -> Void = {}
+    var onRestoreOriginal: () -> Void = {}
 
     var body: some View {
         HStack {
@@ -186,32 +273,52 @@ struct PreviewToolbar: View {
                 Label("Gallery", systemImage: "square.grid.2x2")
             }
 
-            Divider()
-                .frame(height: 20)
+            Divider().frame(height: 20)
 
-            // Rotation buttons
-            Button(action: { rotation -= .degrees(90) }) {
+            // Undo / Redo
+            Button(action: { appState.undo() }) {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .disabled(!appState.canUndo)
+            .help("Undo (Cmd+Z)")
+
+            Button(action: { appState.redo() }) {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .disabled(!appState.canRedo)
+            .help("Redo (Cmd+Shift+Z)")
+
+            Divider().frame(height: 20)
+
+            // 90° rotation — baked to file immediately
+            Button(action: onRotateCCW) {
                 Image(systemName: "rotate.left")
             }
-            .help("Rotate CCW (Cmd+Left)")
+            .help("Rotate 90° CCW — saved to file (Cmd+Left)")
+            .disabled(isCropping)
 
-            Button(action: { rotation += .degrees(90) }) {
+            Button(action: onRotateCW) {
                 Image(systemName: "rotate.right")
             }
-            .help("Rotate CW (Cmd+Right)")
+            .help("Rotate 90° CW — saved to file (Cmd+Right)")
+            .disabled(isCropping)
 
-            // Fine horizon-level button
-            Button(action: { showRotationPanel.toggle() }) {
-                Image(systemName: showRotationPanel ? "level.fill" : "level")
+            Divider().frame(height: 20)
+
+            // Restore original
+            if hasOriginalBackup {
+                Button(action: onRestoreOriginal) {
+                    Label("Restore Original", systemImage: "arrow.counterclockwise")
+                }
+                .help("Restore the unedited original file")
+                .disabled(isCropping)
+
+                Divider().frame(height: 20)
             }
-            .help("Fine rotation / horizon level")
-
-            Divider()
-                .frame(height: 20)
 
             // Crop button
-            Button(action: { isCropping.toggle() }) {
-                Label("Crop", systemImage: "crop")
+            Button(action: { if isCropping { onCancelCrop() } else { onEnterCrop() } }) {
+                Label(isCropping ? "Cropping…" : "Crop", systemImage: "crop")
             }
             .help("Toggle Crop Mode")
 
@@ -223,15 +330,8 @@ struct PreviewToolbar: View {
                 }
                 .frame(width: 100)
 
-                Button("Apply") {
-                    // Handled in PreviewView
-                }
-                .keyboardShortcut(.return, modifiers: [])
-
-                Button("Cancel") {
-                    isCropping = false
-                }
-                .keyboardShortcut(.escape, modifiers: [])
+                Button("Apply", action: onApplyCrop)
+                Button("Cancel", action: onCancelCrop)
             }
 
             Spacer()
@@ -242,6 +342,14 @@ struct PreviewToolbar: View {
             }
             .help("Toggle EXIF (I)")
 
+            // Guiding grid toggle
+            Button(action: { appState.showGuidingGrid.toggle() }) {
+                Image(systemName: "grid")
+                    .foregroundStyle(appState.showGuidingGrid ? .blue : .primary)
+            }
+            .help("Toggle guiding grid (H)")
+            .disabled(isCropping)
+
             // Clipping warnings toggle
             Button(action: { appState.showClippingWarnings.toggle() }) {
                 Image(systemName: appState.showClippingWarnings
@@ -249,7 +357,7 @@ struct PreviewToolbar: View {
                     : "exclamationmark.triangle")
                 .foregroundStyle(appState.showClippingWarnings ? .yellow : .primary)
             }
-            .help("Toggle Clipping Warnings — red: blown highlights, blue: crushed shadows (W)")
+            .help("Toggle Clipping Warnings (W)")
 
             // Trash button
             Button(action: { appState.trashPreviewImage() }) {
@@ -273,6 +381,8 @@ struct PreviewToolbar: View {
         .background(Color(NSColor.windowBackgroundColor))
     }
 }
+
+// MARK: - Navigation bar
 
 /// Bottom navigation bar showing position
 struct PreviewNavigationBar: View {

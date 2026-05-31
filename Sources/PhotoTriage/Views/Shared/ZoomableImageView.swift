@@ -5,6 +5,10 @@ import AppKit
 struct ZoomableImageView: View {
     let url: URL
     var showClippingWarnings: Bool = false
+    /// Increment to force a reload from disk (e.g. after crop undo/redo)
+    var reloadToken: Int = 0
+    /// Increment to reset zoom/pan to fit-to-window without reloading the image
+    var resetZoomToken: Int = 0
 
     @State private var image: NSImage?
     @State private var isLoading = true
@@ -60,9 +64,10 @@ struct ZoomableImageView: View {
             .background(Color.black)
             .clipped()
         }
-        .task(id: url) {
+        .task(id: "\(url.absoluteString)-\(reloadToken)") {
             await loadImage()
         }
+        .onChange(of: resetZoomToken) { _, _ in resetZoom() }
     }
 
     private func effectiveScale(in containerSize: CGSize) -> CGFloat {

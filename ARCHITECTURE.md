@@ -5,7 +5,7 @@
 - **Language**: Swift 5.9+
 - **UI Framework**: SwiftUI (primary) + AppKit interop for image manipulation
 - **Image handling**: CoreImage (filters, rotation, crop), ImageIO (RAW decode), CGImage
-- **Hashing**: vImage (resize for dHash) + custom dHash implementation
+- **Hashing**: vImage (resize for dHash) + custom dHash implementation + CoreGraphics for color histogram
 - **Database**: SQLite via GRDB.swift for hash cache + progress state
 - **File operations**: FileManager + NSWorkspace (trash)
 - **Minimum deployment**: macOS 14.0 (Sonoma)
@@ -62,10 +62,12 @@ PhotoTriage/
 │   │   └── ClippingAnalyzer.swift        # Background pixel analysis for highlight/shadow masks
 │   └── Utilities/
 │       ├── DHash.swift                   # Perceptual hash algorithm
+│       ├── ColorHistogram.swift          # 16-bucket RGB histogram + L1 distance
 │       ├── EXIFReader.swift              # Extract EXIF metadata
 │       └── FileExtensions.swift          # RAW/JPEG extension sets
 ├── PhotoTriageTests/
 │   ├── DHashTests.swift
+│   ├── ColorHistogramTests.swift
 │   ├── SentinelStateTests.swift
 │   ├── ImageFolderTests.swift
 │   ├── SimilarityEngineTests.swift
@@ -100,34 +102,37 @@ AppState (current view, anchor, candidate queue, undo stack)
 
 ## Similarity Engine Detail
 
-```swift
-func findCandidates(for anchor: ImageAsset, in folder: ImageFolder) -> [ImageAsset] {
-    let others = folder.images.filter { $0.id != anchor.id && !$0.isTrashed }
-    
-    return others.sorted { a, b in
-        let scoreA = similarityScore(anchor: anchor, candidate: a)
-        let scoreB = similarityScore(anchor: anchor, candidate: b)
-        return scoreA < scoreB  // lower = more similar
-    }
-}
+Three-component score (lower = more similar, range 0–1):
 
-func similarityScore(anchor: ImageAsset, candidate: ImageAsset) -> Double {
-    let hashDistance = Double(hammingDistance(anchor.dHash, candidate.dHash)) / 256.0  // 0..1
-    let timeDelta = abs(anchor.captureTime - candidate.captureTime)
-    let timeScore = min(timeDelta / 3600.0, 1.0)  // normalize: 1 hour → 1.0
-    
-    // Weight: 70% content similarity, 30% time proximity
-    return hashDistance * 0.7 + timeScore * 0.3
-}
 ```
+score = contentScore × 0.60 + timeScore × 0.30 + aspectScore × 0.10
+
+contentScore = (dHashDistance + histogramDistance) / 2   # each 0..1; falls back to dHash-only if no histogram
+dHashDistance  = hammingDistance(a.dHash, b.dHash) / 256.0
+histogramDistance = l1Distance(a.histogram, b.histogram) / (2 × 3 channels)  # normalized 0..1
+timeScore = min(secondsBetweenCaptures / 3600.0, 1.0)    # 1 hr cap; unknown time = 1.0
+aspectScore = abs(arA - arB) / max(arA, arB)              # 0 for identical ratio; 0 if either unknown
+```
+
+**Data stored per image in `.photo-triage.db`:**
+- `dHash` — 256-bit perceptual hash (`Data`, 32 bytes)
+- `colorHistogram` — 192 bytes: 16 buckets × 3 channels × Float32, normalized to [0,1]
+- `imageWidth`, `imageHeight` — pixel dimensions from ImageIO (no full decode)
+- `captureDate` — from EXIF
 
 **dHash algorithm**:
 1. Resize image to 17×16 grayscale
 2. Compare adjacent horizontal pixels (left > right = 1, else 0)
-3. Produces 256-bit hash
-4. Hamming distance = number of differing bits
+3. Produces 256-bit hash; Hamming distance = number of differing bits
+
+**Color histogram (`ColorHistogram.analyze`)**:
+- Uses a 64×64 CGImageSource thumbnail — very fast, no full RAW decode
+- 16 evenly-spaced buckets per channel (R, G, B); each channel normalized to sum = 1.0
+- L1 distance: `Σ|a_i - b_i| / (2 × channels)` → [0, 1]
 
 **No threshold**: Always return sorted candidates. Right pane always shows the top candidate.
+
+**DB migration**: `HashCache.init` adds `colorHistogram`, `imageWidth`, `imageHeight` columns if absent. Old records missing the histogram are backfilled during the next `computeHashes` pass.
 
 ## Sentinel File Design
 

@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import CoreImage
 import CoreGraphics
+import ImageIO
 
 /// Crop aspect ratio presets
 enum CropPreset: String, CaseIterable, Identifiable {
@@ -92,44 +93,95 @@ struct CropRect: Equatable {
 /// Service for applying crops to JPEG images
 actor CropService {
     /// Backup directory name
-    private let backupDirName = ".photo-triage-originals"
+    private nonisolated let backupDirName = ".photo-triage-originals"
 
-    /// Apply crop to a JPEG image
+    /// Apply a 90-degree rotation to a JPEG image and save it to disk.
+    /// The dimensions swap (portrait ↔ landscape). The original is backed up on first edit.
+    func applyRotation(to url: URL, clockwise: Bool) async throws -> URL {
+        guard url.isJPEG else { throw CropError.rawNotSupported }
+
+        try backupOriginal(url: url)
+
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw CropError.loadFailed
+        }
+
+        let rotated = try rotate90(cgImage, clockwise: clockwise)
+        let nsImage = NSImage(cgImage: rotated, size: NSSize(width: rotated.width, height: rotated.height))
+        try saveJPEG(image: nsImage, to: url)
+        return url
+    }
+
+    /// Rotate a CGImage by exactly 90°, swapping width and height.
+    private func rotate90(_ image: CGImage, clockwise: Bool) throws -> CGImage {
+        let w = image.width, h = image.height
+        // New canvas dimensions swap: width becomes h, height becomes w
+        guard let ctx = CGContext(
+            data: nil,
+            width: h,
+            height: w,
+            bitsPerComponent: image.bitsPerComponent,
+            bytesPerRow: 0,
+            space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: image.bitmapInfo.rawValue
+        ) else { throw CropError.cropFailed }
+
+        if clockwise {
+            // CW visual: translate to (0, w) then rotate -π/2 in y-up context
+            ctx.translateBy(x: 0, y: CGFloat(w))
+            ctx.rotate(by: -.pi / 2)
+        } else {
+            // CCW visual: translate to (h, 0) then rotate +π/2 in y-up context
+            ctx.translateBy(x: CGFloat(h), y: 0)
+            ctx.rotate(by: .pi / 2)
+        }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+
+        guard let result = ctx.makeImage() else { throw CropError.cropFailed }
+        return result
+    }
+
+    /// Apply crop (and optional fine rotation) to a JPEG image.
+    /// The rotation is baked in before cropping — both operations are applied as a single step.
     /// - Parameters:
-    ///   - url: Image URL
-    ///   - cropRect: Crop region in image coordinates
-    /// - Returns: URL of cropped image (same as input, original backed up)
-    func applyCrop(to url: URL, cropRect: CropRect) async throws -> URL {
+    ///   - url: Destination URL (always written here; original is backed up on first edit)
+    ///   - cropRect: Crop region in image coordinates (pre-rotation)
+    ///   - rotation: Fine rotation in degrees to apply before cropping (default 0)
+    ///   - sourceURL: If provided, load pixels from here instead of `url` (e.g. the backup/original
+    ///     when recropping a previously-cropped image). The backup of `url` is still created first.
+    /// - Returns: URL of saved image (same as `url`; original is backed up)
+    func applyCrop(to url: URL, cropRect: CropRect, rotation: Double = 0, sourceURL: URL? = nil) async throws -> URL {
         // Only JPEG supported for crop (RAW kept pristine)
         guard url.isJPEG else {
             throw CropError.rawNotSupported
         }
 
-        // Backup original
+        // Backup the current file at `url` (no-op if backup already exists)
         try backupOriginal(url: url)
 
-        // Load image
-        guard let image = NSImage(contentsOf: url) else {
+        // Load from sourceURL when recropping from original, otherwise from url.
+        // NSImage.size is DPI-dependent (e.g. a 6000×4000 JPEG at 240 DPI returns 1800×1200),
+        // which would cause crops to be applied at the wrong scale and position.
+        let loadURL = sourceURL ?? url
+        guard let source = CGImageSourceCreateWithURL(loadURL as CFURL, nil),
+              var cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw CropError.loadFailed
         }
 
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            throw CropError.loadFailed
+        // Apply fine rotation first (keeps original canvas size, clips tiny corners)
+        if abs(rotation) > 0.001 {
+            cgImage = try rotateImage(cgImage, byDegrees: rotation)
         }
 
-        // Apply crop
-        let cropCGRect = CGRect(
-            x: cropRect.x,
-            y: CGFloat(cgImage.height) - cropRect.y - cropRect.height,  // Flip Y
-            width: cropRect.width,
-            height: cropRect.height
-        )
+        // CGImage.cropping(to:) uses upper-left origin (matching JPEG file storage order),
+        // so CropRect coordinates map directly — no Y-flip needed.
+        let cropCGRect = cropRect.cgRect
 
         guard let croppedCGImage = cgImage.cropping(to: cropCGRect) else {
             throw CropError.cropFailed
         }
 
-        // Save cropped image
         let croppedNSImage = NSImage(cgImage: croppedCGImage, size: NSSize(
             width: croppedCGImage.width,
             height: croppedCGImage.height
@@ -138,6 +190,33 @@ actor CropService {
         try saveJPEG(image: croppedNSImage, to: url)
 
         return url
+    }
+
+    /// Rotate a CGImage by the given degrees, keeping the original canvas dimensions.
+    /// For small angles (horizon correction), the clipped corners are negligible.
+    private func rotateImage(_ image: CGImage, byDegrees degrees: Double) throws -> CGImage {
+        let radians = CGFloat(degrees * .pi / 180.0)
+        let w = image.width
+        let h = image.height
+
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: image.bitsPerComponent,
+            bytesPerRow: 0,
+            space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: image.bitmapInfo.rawValue
+        ) else { throw CropError.cropFailed }
+
+        // Rotate around the centre; CoreGraphics Y-axis is flipped so negate angle
+        ctx.translateBy(x: CGFloat(w) / 2, y: CGFloat(h) / 2)
+        ctx.rotate(by: -radians)
+        ctx.translateBy(x: -CGFloat(w) / 2, y: -CGFloat(h) / 2)
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        guard let rotated = ctx.makeImage() else { throw CropError.cropFailed }
+        return rotated
     }
 
     /// Restore original from backup
@@ -159,7 +238,7 @@ actor CropService {
 
     // MARK: - Private
 
-    private func backupURL(for url: URL) -> URL {
+    nonisolated func backupURL(for url: URL) -> URL {
         let folder = url.deletingLastPathComponent()
         let backupDir = folder.appendingPathComponent(backupDirName)
         return backupDir.appendingPathComponent(url.lastPathComponent)

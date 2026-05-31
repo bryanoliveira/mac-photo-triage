@@ -42,6 +42,9 @@ struct ComparisonPane: View {
                     isFitToWindow: $isFitToWindow,
                     showClippingWarnings: appState.showClippingWarnings
                 )
+                .overlay {
+                    if appState.showGuidingGrid { GuidingGridOverlay() }
+                }
 
                 // Overlays
                 VStack {

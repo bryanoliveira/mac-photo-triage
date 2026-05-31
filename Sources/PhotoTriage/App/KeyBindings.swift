@@ -26,6 +26,7 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
     case toggleZoom = "view.toggleZoom"
     case toggleEXIF = "view.toggleEXIF"
     case toggleClipping = "view.toggleClipping"
+    case toggleGrid = "view.toggleGrid"
     case switchToTriage = "view.triage"
     case switchToGallery = "view.gallery"
     case toggleFavorite = "view.favorite"
@@ -33,6 +34,7 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
     // Triage-specific
     case openLeftPreview = "triage.previewLeft"
     case openRightPreview = "triage.previewRight"
+    case swapPair = "triage.swapPair"
 
     // System
     case undo = "system.undo"
@@ -65,11 +67,13 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
         case .toggleZoom: return "Toggle Zoom"
         case .toggleEXIF: return "Toggle EXIF Overlay"
         case .toggleClipping: return "Toggle Clipping Warnings"
+        case .toggleGrid: return "Toggle Guiding Grid"
         case .switchToTriage: return "Switch to Triage"
         case .switchToGallery: return "Switch to Gallery"
         case .toggleFavorite: return "Toggle Favorite"
         case .openLeftPreview: return "Preview Left Image"
         case .openRightPreview: return "Preview Right Image"
+        case .swapPair: return "Swap Anchor and Candidate"
         case .undo: return "Undo"
         case .redo: return "Redo"
         case .openFolder: return "Open Folder"
@@ -88,9 +92,9 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
             return "Triage Actions"
         case .rotateCCW, .rotateCW, .applyCrop, .cancelCrop, .trashCurrentImage:
             return "Preview"
-        case .toggleZoom, .toggleEXIF, .toggleClipping, .switchToTriage, .switchToGallery, .toggleFavorite:
+        case .toggleZoom, .toggleEXIF, .toggleClipping, .toggleGrid, .switchToTriage, .switchToGallery, .toggleFavorite:
             return "View"
-        case .openLeftPreview, .openRightPreview:
+        case .openLeftPreview, .openRightPreview, .swapPair:
             return "Triage"
         case .undo, .redo, .openFolder, .emptyTrash:
             return "System"
@@ -203,6 +207,7 @@ final class KeyBindings: ObservableObject {
         .toggleZoom: KeyBinding(action: .toggleZoom, key: "space", modifiers: []),
         .toggleEXIF: KeyBinding(action: .toggleEXIF, key: "i", modifiers: []),
         .toggleClipping: KeyBinding(action: .toggleClipping, key: "w", modifiers: []),
+        .toggleGrid: KeyBinding(action: .toggleGrid, key: "h", modifiers: []),
         .switchToTriage: KeyBinding(action: .switchToTriage, key: "t", modifiers: []),
         .switchToGallery: KeyBinding(action: .switchToGallery, key: "g", modifiers: []),
         .toggleFavorite: KeyBinding(action: .toggleFavorite, key: "f", modifiers: []),
@@ -210,6 +215,7 @@ final class KeyBindings: ObservableObject {
         // Triage preview
         .openLeftPreview: KeyBinding(action: .openLeftPreview, key: "p", modifiers: []),
         .openRightPreview: KeyBinding(action: .openRightPreview, key: "p", modifiers: ["shift"]),
+        .swapPair: KeyBinding(action: .swapPair, key: "s", modifiers: []),
 
         // System
         .undo: KeyBinding(action: .undo, key: "z", modifiers: ["command"]),

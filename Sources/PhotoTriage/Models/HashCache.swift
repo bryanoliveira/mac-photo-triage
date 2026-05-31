@@ -9,6 +9,9 @@ struct HashRecord: Codable, FetchableRecord, PersistableRecord {
     var fileModified: Date     // Last modification time (to detect changes)
     var dHash: Data            // 256-bit perceptual hash
     var captureDate: Date?     // EXIF capture date
+    var colorHistogram: Data?  // 16-bucket × 3-channel normalized histogram (192 bytes)
+    var imageWidth: Int?       // Pixel width (from EXIF/ImageIO, no decode needed)
+    var imageHeight: Int?      // Pixel height
     var updatedAt: Date
 
     // Primary key
@@ -27,14 +30,27 @@ actor HashCache {
         // Create database
         dbQueue = try DatabaseQueue(path: dbPath)
 
-        // Create tables
+        // Create/migrate table
         try await dbQueue.write { db in
             try db.create(table: HashRecord.databaseTableName, ifNotExists: true) { t in
                 t.column("filePath", .text).primaryKey()
                 t.column("fileModified", .datetime).notNull()
                 t.column("dHash", .blob).notNull()
                 t.column("captureDate", .datetime)
+                t.column("colorHistogram", .blob)
+                t.column("imageWidth", .integer)
+                t.column("imageHeight", .integer)
                 t.column("updatedAt", .datetime).notNull()
+            }
+
+            // Migrate existing databases that predate colorHistogram/imageWidth/imageHeight columns
+            let existing = try db.columns(in: HashRecord.databaseTableName).map(\.name)
+            if !existing.contains("colorHistogram") {
+                try db.alter(table: HashRecord.databaseTableName) { t in
+                    t.add(column: "colorHistogram", .blob)
+                    t.add(column: "imageWidth", .integer)
+                    t.add(column: "imageHeight", .integer)
+                }
             }
         }
     }
@@ -60,8 +76,15 @@ actor HashCache {
         }
     }
 
-    /// Store hash for a file
-    func storeHash(_ dHash: Data, captureDate: Date?, for url: URL) async throws {
+    /// Store hash and supplementary analysis for a file
+    func storeHash(
+        _ dHash: Data,
+        captureDate: Date?,
+        colorHistogram: Data? = nil,
+        imageWidth: Int? = nil,
+        imageHeight: Int? = nil,
+        for url: URL
+    ) async throws {
         let relativePath = relativePathFrom(url)
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
@@ -72,6 +95,9 @@ actor HashCache {
             fileModified: fileModified,
             dHash: dHash,
             captureDate: captureDate,
+            colorHistogram: colorHistogram,
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
             updatedAt: Date()
         )
 

@@ -5,9 +5,7 @@ struct DetailPanel: View {
     @ObservedObject var asset: ImageAsset
     @EnvironmentObject var appState: AppState
 
-    @State private var editableTitle: String = ""
-    @State private var editableTags: String = ""
-    @State private var rating: Int = 0
+    @State private var hasOriginalBackup: Bool = false
 
     var body: some View {
         ScrollView {
@@ -35,13 +33,19 @@ struct DetailPanel: View {
             .padding()
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .task(id: asset.displayURL) { await checkBackup() }
+        .onChange(of: appState.cropVersion) { _, _ in Task { await checkBackup() } }
+    }
+
+    private func checkBackup() async {
+        hasOriginalBackup = await CropService().hasBackup(for: asset.displayURL)
     }
 
     // MARK: - Sections
 
     private var thumbnailSection: some View {
         VStack {
-            AsyncThumbnail(url: asset.displayURL, size: 200)
+            AsyncThumbnail(url: asset.displayURL, size: 200, reloadToken: asset.thumbnailVersion)
                 .cornerRadius(8)
 
             HStack {
@@ -190,6 +194,31 @@ struct DetailPanel: View {
                 }
                 .buttonStyle(.bordered)
             }
+
+            if hasOriginalBackup {
+                Divider()
+
+                Button(action: restoreOriginal) {
+                    Label("Restore Original", systemImage: "arrow.counterclockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .help("Replace the current file with the unedited original")
+            }
+        }
+    }
+
+    private func restoreOriginal() {
+        Task {
+            let service = CropService()
+            do {
+                try await service.restoreOriginal(for: asset.displayURL)
+                appState.cropVersion += 1
+                asset.thumbnailVersion += 1
+                hasOriginalBackup = false
+            } catch {
+                appState.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -204,7 +233,7 @@ struct DetailPanel: View {
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
-        formatter.timeStyle = .short
+        formatter.timeStyle = .medium  // includes seconds
         return formatter.string(from: date)
     }
 }
