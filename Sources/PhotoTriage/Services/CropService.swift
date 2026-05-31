@@ -161,13 +161,17 @@ actor CropService {
         try backupOriginal(url: url)
 
         // Load from sourceURL when recropping from original, otherwise from url.
-        // NSImage.size is DPI-dependent (e.g. a 6000×4000 JPEG at 240 DPI returns 1800×1200),
-        // which would cause crops to be applied at the wrong scale and position.
+        // CGImageSourceCreateImageAtIndex gives native pixel dimensions (no DPI scaling), but
+        // ignores the EXIF orientation tag. We apply orientation first so that the crop rect
+        // (drawn in display space by CropOverlay, which applies the same transform) aligns
+        // correctly with the pixel data written to disk.
         let loadURL = sourceURL ?? url
         guard let source = CGImageSourceCreateWithURL(loadURL as CFURL, nil),
-              var cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let raw = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw CropError.loadFailed
         }
+        let orientation = source.exifOrientation
+        var cgImage = raw.applyingExifOrientation(orientation) ?? raw
 
         // Apply fine rotation first (keeps original canvas size, clips tiny corners)
         if abs(rotation) > 0.001 {

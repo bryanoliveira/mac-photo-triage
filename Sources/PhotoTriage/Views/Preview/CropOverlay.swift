@@ -331,14 +331,17 @@ struct CropOverlay: View {
     private func loadImage() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                // CGImageSource gives the native pixel dimensions, avoiding the DPI-scaling
-                // bug where NSImage.size returns logical points (e.g. 1800×1200 for a 6000×4000
-                // JPEG at 240 DPI). CropRect coordinates must match what CropService applies.
+                // CGImageSourceCreateImageAtIndex gives native pixel dimensions (no DPI scaling),
+                // but it ignores the EXIF orientation tag. We apply it manually so the crop UI
+                // matches what NSImage / Finder show. CropService.applyCrop applies the same
+                // transform before cropping, keeping both in the same coordinate space.
                 guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                      let cgImg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                      let raw = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                     DispatchQueue.main.async { continuation.resume() }
                     return
                 }
+                let orientation = source.exifOrientation
+                let cgImg = raw.applyingExifOrientation(orientation) ?? raw
                 let pixelSize = CGSize(width: cgImg.width, height: cgImg.height)
                 let nsImage = NSImage(cgImage: cgImg,
                                       size: NSSize(width: cgImg.width, height: cgImg.height))
