@@ -62,6 +62,12 @@ Native macOS app for organizing DSLR photos. Three primary views: **Gallery** (d
 - **Apply** (Enter or toolbar button): rotation is baked in first, then crop is applied — both in a single CGContext pass. The original is backed up first (no-op if already backed up). If recropping from original, the crop is applied to the original file rather than the current one.
 - **Cancel** (Escape or toolbar button): discards crop rect and rotation adjustment, restores crop button to normal
 
+#### Metadata preservation on edit
+
+- All edits (crop, rotation, tone adjustments) carry the original photo's EXIF/TIFF/GPS metadata (camera, lens, exposure, capture date, GPS) into the saved JPEG, copied from the pristine backup so it survives even repeated edits.
+- The EXIF capture timestamp (`DateTimeOriginal`) is left unchanged; only the TIFF modify time (`DateTime`) is bumped to the edit time.
+- Orientation is reset to upright (the edited pixels are already display-correct), and the editor stamps `Software` = "Photo Triage" plus a `UserComment` describing the edit.
+
 #### Restore Original
 
 - Appears in toolbar when the current image has been edited (backup exists)

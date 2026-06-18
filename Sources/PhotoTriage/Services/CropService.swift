@@ -3,6 +3,7 @@ import AppKit
 import CoreImage
 import CoreGraphics
 import ImageIO
+import UniformTypeIdentifiers
 
 /// Crop aspect ratio presets
 enum CropPreset: String, CaseIterable, Identifiable {
@@ -30,6 +31,17 @@ enum CropPreset: String, CaseIterable, Identifiable {
         case .nineSixteen: return 9.0 / 16.0
         }
     }
+}
+
+/// Saved edit parameters persisted alongside the original backup so that re-entering
+/// Edit mode can restore the exact crop rect, horizon rotation, and tone adjustments.
+struct CropMetadata: Codable {
+    let cropX: CGFloat
+    let cropY: CGFloat
+    let cropWidth: CGFloat
+    let cropHeight: CGFloat
+    let rotation: Double
+    let adjustments: ImageAdjustments?  // nil in sidecars written before adjustments were added
 }
 
 /// Represents a crop region
@@ -103,13 +115,20 @@ actor CropService {
         try backupOriginal(url: url)
 
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let raw = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw CropError.loadFailed
         }
 
+        // CGImageSourceCreateImageAtIndex ignores the EXIF orientation tag, so camera files that
+        // store a rotation in metadata (rather than baked-upright pixels) would otherwise rotate
+        // from the wrong starting orientation. Bake the display orientation in first; writeJPEG
+        // then saves with orientation reset to Up.
+        let cgImage = raw.applyingExifOrientation(source.exifOrientation) ?? raw
+
         let rotated = try rotate90(cgImage, clockwise: clockwise)
-        let nsImage = NSImage(cgImage: rotated, size: NSSize(width: rotated.width, height: rotated.height))
-        try saveJPEG(image: nsImage, to: url)
+        try writeJPEG(rotated, to: url, metadataFrom: backupURL(for: url),
+                      editNote: "Rotated 90° \(clockwise ? "clockwise" : "counter-clockwise")")
+        try? FileManager.default.removeItem(at: sidecarURL(for: url))
         return url
     }
 
@@ -142,17 +161,19 @@ actor CropService {
         return result
     }
 
-    /// Apply crop (and optional fine rotation) to a JPEG image.
-    /// The rotation is baked in before cropping — both operations are applied as a single step.
+    /// Apply crop, fine rotation, and tone adjustments to a JPEG image in a single pass.
+    /// Pipeline: EXIF orientation → tone adjustments → fine rotation → crop.
     /// - Parameters:
     ///   - url: Destination URL (always written here; original is backed up on first edit)
-    ///   - cropRect: Crop region in image coordinates (pre-rotation)
+    ///   - cropRect: Crop region in image coordinates (display space after EXIF orientation)
     ///   - rotation: Fine rotation in degrees to apply before cropping (default 0)
+    ///   - adjustments: Tone adjustments baked via CoreImage (default = identity)
     ///   - sourceURL: If provided, load pixels from here instead of `url` (e.g. the backup/original
-    ///     when recropping a previously-cropped image). The backup of `url` is still created first.
+    ///     when re-editing a previously-edited image). The backup of `url` is still created first.
     /// - Returns: URL of saved image (same as `url`; original is backed up)
-    func applyCrop(to url: URL, cropRect: CropRect, rotation: Double = 0, sourceURL: URL? = nil) async throws -> URL {
-        // Only JPEG supported for crop (RAW kept pristine)
+    func applyCrop(to url: URL, cropRect: CropRect, rotation: Double = 0,
+                   adjustments: ImageAdjustments = .init(), sourceURL: URL? = nil) async throws -> URL {
+        // Only JPEG supported (RAW kept pristine)
         guard url.isJPEG else {
             throw CropError.rawNotSupported
         }
@@ -160,7 +181,7 @@ actor CropService {
         // Backup the current file at `url` (no-op if backup already exists)
         try backupOriginal(url: url)
 
-        // Load from sourceURL when recropping from original, otherwise from url.
+        // Load from sourceURL when re-editing from original, otherwise from url.
         // CGImageSourceCreateImageAtIndex gives native pixel dimensions (no DPI scaling), but
         // ignores the EXIF orientation tag. We apply orientation first so that the crop rect
         // (drawn in display space by CropOverlay, which applies the same transform) aligns
@@ -173,25 +194,36 @@ actor CropService {
         let orientation = source.exifOrientation
         var cgImage = raw.applyingExifOrientation(orientation) ?? raw
 
-        // Apply fine rotation first (keeps original canvas size, clips tiny corners)
+        // Apply tone adjustments via CoreImage (before geometric operations)
+        if !adjustments.isIdentity {
+            let ciImage = CIImage(cgImage: cgImage)
+            let adjusted = adjustments.applyingCI(to: ciImage)
+            let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+            if let rendered = ciContext.createCGImage(adjusted, from: adjusted.extent) {
+                cgImage = rendered
+            }
+        }
+
+        // Apply fine rotation (keeps original canvas size, clips tiny corners)
         if abs(rotation) > 0.001 {
             cgImage = try rotateImage(cgImage, byDegrees: rotation)
         }
 
         // CGImage.cropping(to:) uses upper-left origin (matching JPEG file storage order),
         // so CropRect coordinates map directly — no Y-flip needed.
-        let cropCGRect = cropRect.cgRect
-
-        guard let croppedCGImage = cgImage.cropping(to: cropCGRect) else {
+        guard let croppedCGImage = cgImage.cropping(to: cropRect.cgRect) else {
             throw CropError.cropFailed
         }
 
-        let croppedNSImage = NSImage(cgImage: croppedCGImage, size: NSSize(
-            width: croppedCGImage.width,
-            height: croppedCGImage.height
-        ))
+        try writeJPEG(croppedCGImage, to: url, metadataFrom: backupURL(for: url),
+                      editNote: editNote(cropRect: cropRect, rotation: rotation, adjustments: adjustments))
 
-        try saveJPEG(image: croppedNSImage, to: url)
+        let meta = CropMetadata(cropX: cropRect.x, cropY: cropRect.y,
+                                cropWidth: cropRect.width, cropHeight: cropRect.height,
+                                rotation: rotation, adjustments: adjustments)
+        if let data = try? JSONEncoder().encode(meta) {
+            try? data.write(to: sidecarURL(for: url))
+        }
 
         return url
     }
@@ -233,6 +265,7 @@ actor CropService {
 
         try FileManager.default.removeItem(at: url)
         try FileManager.default.copyItem(at: backupURL, to: url)
+        try? FileManager.default.removeItem(at: sidecarURL(for: url))
     }
 
     /// Check if backup exists
@@ -246,6 +279,16 @@ actor CropService {
         let folder = url.deletingLastPathComponent()
         let backupDir = folder.appendingPathComponent(backupDirName)
         return backupDir.appendingPathComponent(url.lastPathComponent)
+    }
+
+    nonisolated func sidecarURL(for url: URL) -> URL {
+        backupURL(for: url).appendingPathExtension("json")
+    }
+
+    /// Read saved crop metadata for `url`, or nil if none exists.
+    nonisolated func cropMetadata(for url: URL) -> CropMetadata? {
+        guard let data = try? Data(contentsOf: sidecarURL(for: url)) else { return nil }
+        return try? JSONDecoder().decode(CropMetadata.self, from: data)
     }
 
     private func backupOriginal(url: URL) throws {
@@ -264,14 +307,96 @@ actor CropService {
         }
     }
 
-    private func saveJPEG(image: NSImage, to url: URL) throws {
-        guard let tiffData = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData),
-              let jpegData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else {
+    /// Write `image` as JPEG to `url`, carrying the EXIF/TIFF/GPS metadata from `metadataFrom`
+    /// (the pristine original) so camera/lens/exposure/capture info survives the edit.
+    ///
+    /// The edit bakes display-upright, cropped/rotated pixels, so the saved file's orientation is
+    /// reset to `.up` to prevent viewers from re-applying the original tag. The TIFF DateTime
+    /// (modify time) is bumped to now and the editor stamps `Software`/`UserComment`, while the
+    /// original capture date (`DateTimeOriginal`/`DateTimeDigitized`) is left untouched. After the
+    /// file is written, the original's filesystem creation date is restored from the backup so
+    /// Finder and photo importers keep showing when the shot was taken; the filesystem modification
+    /// date is left at "now" to reflect that the file was edited.
+    private func writeJPEG(_ image: CGImage, to url: URL, metadataFrom metadataURL: URL?,
+                           editNote: String?) throws {
+        // Start from the original's full property set (EXIF, TIFF, GPS, IPTC, …) when available.
+        var props: [CFString: Any] = [:]
+        if let metadataURL,
+           let src = CGImageSourceCreateWithURL(metadataURL as CFURL, nil),
+           let original = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+            props = original
+        }
+
+        // Encode quality and orientation. Pixels are already display-upright + cropped, so the
+        // stored dimensions and orientation must reflect the new image, not the original.
+        props[kCGImageDestinationLossyCompressionQuality] = 0.9
+        props[kCGImagePropertyOrientation] = CGImagePropertyOrientation.up.rawValue
+        props[kCGImagePropertyPixelWidth] = image.width
+        props[kCGImagePropertyPixelHeight] = image.height
+
+        let now = exifDateString(Date())
+
+        // TIFF: orientation/dimensions mirror the top-level keys; DateTime tracks modify time.
+        var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        tiff[kCGImagePropertyTIFFOrientation] = CGImagePropertyOrientation.up.rawValue
+        tiff[kCGImagePropertyTIFFDateTime] = now
+        tiff[kCGImagePropertyTIFFSoftware] = Self.editorSignature
+        props[kCGImagePropertyTIFFDictionary] = tiff
+
+        // EXIF: keep original capture timestamps; record the edit in UserComment.
+        var exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        exif[kCGImagePropertyExifPixelXDimension] = image.width
+        exif[kCGImagePropertyExifPixelYDimension] = image.height
+        if let editNote {
+            exif[kCGImagePropertyExifUserComment] = "Edited with \(Self.editorSignature): \(editNote)"
+        }
+        props[kCGImagePropertyExifDictionary] = exif
+
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.jpeg.identifier as CFString, 1, nil
+        ) else {
+            throw CropError.saveFailed
+        }
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
             throw CropError.saveFailed
         }
 
-        try jpegData.write(to: url)
+        // Rewriting the file in place stamps it with the current filesystem creation date, which is
+        // what Finder's "Created" column (and most photo importers) surface — not the EXIF capture
+        // date. Restore the original's creation date from the pristine backup so an edited photo
+        // keeps showing when it was actually taken. The modification date is deliberately left at
+        // "now": the file genuinely changed, and the edit itself is recorded in TIFF Software /
+        // EXIF UserComment.
+        if let metadataURL,
+           let originalAttrs = try? FileManager.default.attributesOfItem(atPath: metadataURL.path),
+           let created = originalAttrs[.creationDate] as? Date {
+            try? FileManager.default.setAttributes([.creationDate: created], ofItemAtPath: url.path)
+        }
+    }
+
+    /// Editor name stamped into TIFF Software / EXIF UserComment.
+    private static let editorSignature = "Photo Triage"
+
+    /// Format a date as an EXIF/TIFF datetime string ("yyyy:MM:dd HH:mm:ss").
+    private nonisolated func exifDateString(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.string(from: date)
+    }
+
+    /// Build a human-readable summary of a crop edit for the UserComment tag.
+    private nonisolated func editNote(cropRect: CropRect, rotation: Double,
+                                      adjustments: ImageAdjustments) -> String {
+        var parts = ["cropped to \(Int(cropRect.width.rounded()))×\(Int(cropRect.height.rounded()))"]
+        if abs(rotation) > 0.001 {
+            parts.append(String(format: "rotated %.2f°", rotation))
+        }
+        if !adjustments.isIdentity {
+            parts.append("tone adjustments applied")
+        }
+        return parts.joined(separator: ", ")
     }
 }
 

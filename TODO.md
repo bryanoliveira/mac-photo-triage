@@ -72,6 +72,7 @@
 - [x] 59. Unit tests: DHash, ColorHistogram, CropService, SentinelState, ImageFolder, SimilarityEngine, ProgressStore, KeyBindings (84 tests total)
 - [x] 60. EXIF/detail panel timestamps include seconds (`.timeStyle = .medium`)
 - [x] 61. Undo/redo for file edits (crop, 90° rotation): undo restores from `.photo-triage-originals/` backup; redo reapplies operation
+- [x] 62. Edits preserve original EXIF/TIFF/GPS metadata: `CropService.writeJPEG` copies metadata from the pristine backup via `CGImageDestination`, resets orientation, bumps modify time, keeps capture date, restores the original's filesystem creation date (modification date stays "now"), and stamps `Software`/`UserComment` (replaces the old `NSBitmapImageRep` path that dropped all metadata)
 
 ## Remaining / Not Yet Implemented
 - [ ] Window state persistence (size, position, last-opened folder path)

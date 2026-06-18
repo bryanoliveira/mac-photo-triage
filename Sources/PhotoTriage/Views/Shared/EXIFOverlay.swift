@@ -1,70 +1,112 @@
 import SwiftUI
 
-/// Overlay displaying EXIF metadata
+// MARK: - Full overlay
+
+/// Structured EXIF panel shown over the image in Preview mode.
 struct EXIFOverlay: View {
     let metadata: EXIFMetadata?
     let position: OverlayPosition
 
     enum OverlayPosition {
-        case topLeading
-        case topTrailing
-        case bottomLeading
-        case bottomTrailing
+        case topLeading, topTrailing, bottomLeading, bottomTrailing
     }
 
     var body: some View {
-        if let metadata = metadata, !metadata.summaryString.isEmpty {
-            VStack(alignment: alignment, spacing: 4) {
-                if let camera = metadata.cameraString {
+        if let m = metadata, m.hasAnyData {
+            VStack(alignment: .leading, spacing: 0) {
+                // Camera
+                if let camera = m.cameraString {
                     Text(camera)
                         .font(.caption.bold())
+                        .padding(.bottom, 6)
                 }
 
-                Text(metadata.summaryString)
-                    .font(.caption)
-
-                if let lens = metadata.lensString {
-                    Text(lens)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                // Exposure summary chips
+                if !m.summaryString.isEmpty {
+                    Text(m.summaryString)
+                        .font(.caption.monospacedDigit())
+                        .padding(.bottom, 6)
                 }
 
-                if let date = metadata.captureDate {
+                if m.lensString != nil || m.focalLength35mmString != nil
+                    || m.exposureCompensationString != nil || m.flash != nil {
+                    Divider().padding(.bottom, 6)
+                    if let lens = m.lensString {
+                        EXIFInfoRow(label: "Lens", value: lens)
+                    }
+                    if let f35 = m.focalLength35mmString {
+                        EXIFInfoRow(label: "35mm", value: f35)
+                    }
+                    if let ev = m.exposureCompensationString {
+                        EXIFInfoRow(label: "EV", value: ev)
+                    }
+                    if let fl = m.flashString {
+                        EXIFInfoRow(label: "Flash", value: fl)
+                    }
+                }
+
+                if m.resolutionString != nil || m.fileSize != nil {
+                    Divider().padding(.vertical, 6)
+                    if let res = m.resolutionString {
+                        EXIFInfoRow(label: "Size", value: res)
+                    }
+                    if let name = m.filename, let sz = m.fileSizeString {
+                        EXIFInfoRow(label: "File", value: "\(name)  ·  \(sz)")
+                    } else if let name = m.filename {
+                        EXIFInfoRow(label: "File", value: name)
+                    } else if let sz = m.fileSizeString {
+                        EXIFInfoRow(label: "File", value: sz)
+                    }
+                }
+
+                if let date = m.captureDate {
+                    Divider().padding(.vertical, 6)
                     Text(dateFormatter.string(from: date))
                         .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(8)
+            .padding(10)
+            .frame(maxWidth: 300, alignment: .leading)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             .padding(12)
         }
     }
 
-    private var alignment: HorizontalAlignment {
-        switch position {
-        case .topLeading, .bottomLeading:
-            return .leading
-        case .topTrailing, .bottomTrailing:
-            return .trailing
-        }
-    }
-
     private var dateFormatter: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .medium  // includes seconds
-        return formatter
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .medium
+        return f
     }
 }
 
-/// Compact EXIF badge for thumbnails
+private struct EXIFInfoRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .trailing)
+            Text(value)
+                .font(.caption2)
+                .textSelection(.enabled)
+        }
+        .padding(.bottom, 2)
+    }
+}
+
+// MARK: - Compact badge (thumbnails)
+
 struct EXIFBadge: View {
     let metadata: EXIFMetadata?
 
     var body: some View {
-        if let metadata = metadata, !metadata.summaryString.isEmpty {
-            Text(compactSummary)
+        if let m = metadata, !m.summaryString.isEmpty {
+            Text(compactSummary(m))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundColor(.white)
                 .padding(.horizontal, 4)
@@ -74,33 +116,31 @@ struct EXIFBadge: View {
         }
     }
 
-    private var compactSummary: String {
-        var parts: [String] = []
-        if let focal = metadata?.focalLengthString { parts.append(focal) }
-        if let ap = metadata?.apertureString { parts.append(ap) }
-        return parts.joined(separator: " ")
+    private func compactSummary(_ m: EXIFMetadata) -> String {
+        [m.focalLengthString, m.apertureString].compactMap { $0 }.joined(separator: " ")
     }
 }
 
-/// View modifier for adding EXIF overlay
+// MARK: - View modifier
+
 struct EXIFOverlayModifier: ViewModifier {
     let metadata: EXIFMetadata?
     let isVisible: Bool
     let position: EXIFOverlay.OverlayPosition
 
     func body(content: Content) -> some View {
-        content.overlay(alignment: overlayAlignment) {
+        content.overlay(alignment: alignment) {
             if isVisible {
                 EXIFOverlay(metadata: metadata, position: position)
             }
         }
     }
 
-    private var overlayAlignment: Alignment {
+    private var alignment: Alignment {
         switch position {
-        case .topLeading: return .topLeading
-        case .topTrailing: return .topTrailing
-        case .bottomLeading: return .bottomLeading
+        case .topLeading:     return .topLeading
+        case .topTrailing:    return .topTrailing
+        case .bottomLeading:  return .bottomLeading
         case .bottomTrailing: return .bottomTrailing
         }
     }

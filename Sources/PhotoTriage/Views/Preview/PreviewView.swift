@@ -1,47 +1,50 @@
 import SwiftUI
+import CoreGraphics
+import ImageIO
 
 /// Full image preview mode with editing capabilities
 struct PreviewView: View {
     @EnvironmentObject var appState: AppState
 
-    @State private var isCropping = false
+    @State private var isEditing = false
     @State private var zoomResetToken: Int = 0
     @State private var cropRect: CropRect?
     @State private var cropPreset: CropPreset = .free
     @State private var cropFineRotation: Double = 0
+    @State private var imageAdjustments: ImageAdjustments = .init()
     @State private var imageSize: CGSize = .zero
     @State private var hasOriginalBackup: Bool = false
-    /// When recropping a previously-edited image, this points to the backup (original) file
+    /// When re-editing a previously-edited image, this points to the backup (original) file
     @State private var cropSourceURL: URL?
-    /// Pixel size of the current (possibly cropped) image, used to initialize the crop rect within the original
-    @State private var cropSizeHint: CGSize?
+    /// Exact crop rect (in original pixel space) to restore when re-entering Edit mode
+    @State private var cropInitialHint: CropRect?
 
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             PreviewToolbar(
-                isCropping: $isCropping,
-                cropPreset: $cropPreset,
+                isEditing: $isEditing,
                 hasOriginalBackup: hasOriginalBackup,
                 onRotateCCW: { applyRotation(clockwise: false) },
                 onRotateCW:  { applyRotation(clockwise: true) },
-                onEnterCrop: enterCropMode,
-                onApplyCrop: applyCrop,
-                onCancelCrop: cancelCropMode,
+                onEnterEdit: enterEditMode,
+                onApplyEdit: applyEdit,
+                onCancelEdit: cancelEditMode,
                 onRestoreOriginal: restoreOriginal
             )
 
             // Main image view
             ZStack {
                 if let asset = appState.previewAsset {
-                    if isCropping {
+                    if isEditing {
                         CropOverlay(
                             url: cropSourceURL ?? asset.displayURL,
                             cropRect: $cropRect,
-                            preset: cropPreset,
+                            preset: $cropPreset,
                             imageSize: $imageSize,
                             fineRotation: $cropFineRotation,
-                            initialCropSizeHint: cropSizeHint
+                            adjustments: $imageAdjustments,
+                            initialCropHint: cropInitialHint
                         )
                     } else {
                         ZoomableImageView(
@@ -87,12 +90,14 @@ struct PreviewView: View {
             handleKeyAction(action)
         }
         .onAppear {
-            if let asset = appState.previewAsset, asset.exifMetadata == nil {
-                asset.exifMetadata = EXIFReader.read(from: asset.displayURL)
-            }
+            loadEXIF(for: appState.previewAsset)
             checkBackup()
         }
-        .onChange(of: appState.previewAsset) { _, _ in checkBackup() }
+        .onChange(of: appState.previewAsset) { _, newAsset in
+            if isEditing { cancelEditMode() }
+            loadEXIF(for: newAsset)
+            checkBackup()
+        }
         .onChange(of: appState.cropVersion) { _, _ in checkBackup() }
     }
 
@@ -141,11 +146,11 @@ struct PreviewView: View {
             appState.trashPreviewImage()
             return true
         case .applyCrop:
-            if isCropping { applyCrop() }
+            if isEditing { applyEdit() }
             return true
         case .cancelCrop:
-            if isCropping {
-                cancelCropMode()
+            if isEditing {
+                cancelEditMode()
             } else {
                 appState.showGallery()
             }
@@ -163,35 +168,71 @@ struct PreviewView: View {
 
     // MARK: - Actions
 
-    private func enterCropMode() {
+    private func enterEditMode() {
         guard let asset = appState.previewAsset else { return }
         let service = CropService()
         let backup = service.backupURL(for: asset.displayURL)
         if FileManager.default.fileExists(atPath: backup.path) {
             cropSourceURL = backup
-            cropSizeHint = getImagePixelSize(for: asset.displayURL)
+            if let meta = service.cropMetadata(for: asset.displayURL) {
+                cropFineRotation = meta.rotation
+                cropInitialHint = CropRect(x: meta.cropX, y: meta.cropY,
+                                           width: meta.cropWidth, height: meta.cropHeight)
+                imageAdjustments = meta.adjustments ?? .init()
+            } else {
+                cropFineRotation = 0
+                cropInitialHint = centeredCropHint(currentURL: asset.displayURL, originalURL: backup)
+                imageAdjustments = .init()
+            }
         } else {
             cropSourceURL = nil
-            cropSizeHint = nil
+            cropFineRotation = 0
+            cropInitialHint = nil
+            imageAdjustments = .init()
         }
-        isCropping = true
+        isEditing = true
     }
 
-    private func cancelCropMode() {
-        isCropping = false
+    private func cancelEditMode() {
+        isEditing = false
         cropRect = nil
         cropFineRotation = 0
+        imageAdjustments = .init()
         cropSourceURL = nil
-        cropSizeHint = nil
+        cropInitialHint = nil
     }
 
-    /// Read pixel dimensions from image metadata without a full decode (fast).
-    private func getImagePixelSize(for url: URL) -> CGSize? {
+    /// Compute a crop rect centered on the original, matching the current image's display dimensions.
+    private func centeredCropHint(currentURL: URL, originalURL: URL) -> CropRect? {
+        guard let curr = displayPixelSize(for: currentURL),
+              let orig = displayPixelSize(for: originalURL) else { return nil }
+        let cx = (orig.width - curr.width) / 2
+        let cy = (orig.height - curr.height) / 2
+        return CropRect(x: max(0, cx), y: max(0, cy),
+                        width: min(curr.width, orig.width),
+                        height: min(curr.height, orig.height))
+    }
+
+    /// Pixel dimensions in display space (EXIF orientation applied — may swap W/H).
+    private func displayPixelSize(for url: URL) -> CGSize? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let w = props[kCGImagePropertyPixelWidth] as? Int,
-              let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
-        return CGSize(width: w, height: h)
+              let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
+              let h = props[kCGImagePropertyPixelHeight] as? CGFloat else { return nil }
+        switch source.exifOrientation {
+        case .right, .left, .rightMirrored, .leftMirrored: return CGSize(width: h, height: w)
+        default: return CGSize(width: w, height: h)
+        }
+    }
+
+    /// Load EXIF for `asset` on a background thread if not already cached.
+    private func loadEXIF(for asset: ImageAsset?) {
+        guard let asset, asset.exifMetadata == nil else { return }
+        let url = asset.displayURL
+        Task {
+            let meta = await Task.detached { EXIFReader.read(from: url) }.value
+            asset.exifMetadata = meta
+        }
     }
 
     private func applyRotation(clockwise: Bool) {
@@ -207,18 +248,20 @@ struct PreviewView: View {
         }
     }
 
-    private func applyCrop() {
+    private func applyEdit() {
         guard let asset = appState.previewAsset,
               let crop = cropRect else { return }
 
         let fineRot = cropFineRotation
+        let adj = imageAdjustments
         let src = cropSourceURL
         Task {
             let service = CropService()
             do {
-                _ = try await service.applyCrop(to: asset.displayURL, cropRect: crop, rotation: fineRot, sourceURL: src)
+                _ = try await service.applyCrop(to: asset.displayURL, cropRect: crop,
+                                                rotation: fineRot, adjustments: adj, sourceURL: src)
                 appState.recordCropApplied(to: asset, cropRect: crop, rotation: fineRot)
-                cancelCropMode()
+                cancelEditMode()
             } catch {
                 appState.errorMessage = error.localizedDescription
             }
@@ -253,17 +296,16 @@ struct PreviewView: View {
 
 // MARK: - Toolbar
 
-/// Preview toolbar with rotation and crop controls
+/// Preview toolbar with rotation and edit controls
 struct PreviewToolbar: View {
     @EnvironmentObject var appState: AppState
-    @Binding var isCropping: Bool
-    @Binding var cropPreset: CropPreset
+    @Binding var isEditing: Bool
     let hasOriginalBackup: Bool
     var onRotateCCW: () -> Void = {}
     var onRotateCW: () -> Void = {}
-    var onEnterCrop: () -> Void = {}
-    var onApplyCrop: () -> Void = {}
-    var onCancelCrop: () -> Void = {}
+    var onEnterEdit: () -> Void = {}
+    var onApplyEdit: () -> Void = {}
+    var onCancelEdit: () -> Void = {}
     var onRestoreOriginal: () -> Void = {}
 
     var body: some View {
@@ -295,13 +337,13 @@ struct PreviewToolbar: View {
                 Image(systemName: "rotate.left")
             }
             .help("Rotate 90° CCW — saved to file (Cmd+Left)")
-            .disabled(isCropping)
+            .disabled(isEditing)
 
             Button(action: onRotateCW) {
                 Image(systemName: "rotate.right")
             }
             .help("Rotate 90° CW — saved to file (Cmd+Right)")
-            .disabled(isCropping)
+            .disabled(isEditing)
 
             Divider().frame(height: 20)
 
@@ -311,27 +353,20 @@ struct PreviewToolbar: View {
                     Label("Restore Original", systemImage: "arrow.counterclockwise")
                 }
                 .help("Restore the unedited original file")
-                .disabled(isCropping)
+                .disabled(isEditing)
 
                 Divider().frame(height: 20)
             }
 
-            // Crop button
-            Button(action: { if isCropping { onCancelCrop() } else { onEnterCrop() } }) {
-                Label(isCropping ? "Cropping…" : "Crop", systemImage: "crop")
+            // Edit button
+            Button(action: { if isEditing { onCancelEdit() } else { onEnterEdit() } }) {
+                Label(isEditing ? "Editing…" : "Edit", systemImage: "slider.horizontal.3")
             }
-            .help("Toggle Crop Mode")
+            .help("Toggle Edit Mode (crop, horizon, exposure)")
 
-            if isCropping {
-                Picker("Aspect", selection: $cropPreset) {
-                    ForEach(CropPreset.allCases) { preset in
-                        Text(preset.rawValue).tag(preset)
-                    }
-                }
-                .frame(width: 100)
-
-                Button("Apply", action: onApplyCrop)
-                Button("Cancel", action: onCancelCrop)
+            if isEditing {
+                Button("Apply", action: onApplyEdit)
+                Button("Cancel", action: onCancelEdit)
             }
 
             Spacer()
@@ -348,7 +383,7 @@ struct PreviewToolbar: View {
                     .foregroundStyle(appState.showGuidingGrid ? .blue : .primary)
             }
             .help("Toggle guiding grid (H)")
-            .disabled(isCropping)
+            .disabled(isEditing)
 
             // Clipping warnings toggle
             Button(action: { appState.showClippingWarnings.toggle() }) {

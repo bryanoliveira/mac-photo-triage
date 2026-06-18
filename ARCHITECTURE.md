@@ -178,11 +178,11 @@ Handles all JPEG file modifications. Only JPEG is ever written; RAW is always ke
 
 `applyRotation(to url: URL, clockwise: Bool) async throws -> URL`
 - Backs up original (no-op if already backed up)
-- Loads JPEG via CGImageSource at native pixel dimensions
+- Loads JPEG via CGImageSource at native pixel dimensions, then bakes the EXIF orientation in (`applyingExifOrientation`) so camera files that store rotation as a tag rotate from their *displayed* orientation, not the raw sensor orientation
 - Rotates using CGContext with swapped W/H canvas:
   - CW: `translateBy(0, w)` then `rotate(-.pi/2)`
   - CCW: `translateBy(h, 0)` then `rotate(.pi/2)`
-- Saves back as JPEG at 0.9 compression
+- Saves back as JPEG at 0.9 compression, preserving original metadata (see **Metadata preservation** below)
 
 `applyCrop(to url: URL, cropRect: CropRect, rotation: Double = 0, sourceURL: URL? = nil) async throws -> URL`
 - Backs up `url` (no-op if already backed up)
@@ -190,7 +190,17 @@ Handles all JPEG file modifications. Only JPEG is ever written; RAW is always ke
 - Applies fine rotation (if |rotation| > 0.001°) via `rotateImage(_:byDegrees:)` — keeps original canvas dimensions, small black corners are covered by the subsequent crop
 - Crops using `cgImage.cropping(to: cropRect.cgRect)` — CGImage uses upper-left origin matching JPEG file storage order; no Y-flip needed
 - **DPI safety**: always loads via CGImageSource (native pixel dimensions). `NSImage.size` is DPI-scaled and would misplace crops on high-DPI images.
-- Saves back as JPEG at 0.9 compression
+- Saves back as JPEG at 0.9 compression, preserving original metadata (see **Metadata preservation** below)
+
+### Metadata preservation
+
+Both edit paths funnel through `writeJPEG(_:to:metadataFrom:editNote:)`, which writes via ImageIO's `CGImageDestination` rather than re-encoding through `NSBitmapImageRep` (the old path silently dropped all EXIF/TIFF/GPS data). The full property set is copied from the **pristine backup** (`.photo-triage-originals/<filename>`), so camera, lens, exposure, capture date, and GPS survive every edit — even after repeated crops/rotations, since the backup is never overwritten. On write:
+
+- **Orientation** is reset to `1` (Up) at both the top level and in the TIFF dict — the edit bakes display-upright, cropped/rotated pixels, so keeping the original tag would make viewers double-apply the rotation.
+- **Dimensions** (`PixelWidth`/`PixelHeight` and EXIF `PixelXDimension`/`PixelYDimension`) are updated to the new image.
+- **Modify time** (TIFF `DateTime`) is set to now; the capture timestamps (EXIF `DateTimeOriginal`/`DateTimeDigitized`) are left untouched.
+- **Edit-process metadata** is stamped: TIFF `Software` = `"Photo Triage"` and EXIF `UserComment` describes the operation (e.g. `"Edited with Photo Triage: cropped to 300×200, tone adjustments applied"`).
+- **Filesystem creation date** is restored from the backup after the file is written. Rewriting in place would otherwise stamp the file with today, which is what Finder's "Created" column and photo importers surface — independent of the embedded EXIF capture date. The **modification date** is left at "now", since the file really was edited (the edit itself is recorded in TIFF `Software` / EXIF `UserComment`).
 
 `restoreOriginal(for url: URL) throws`
 - Copies backup file back to `url`, replacing the current file

@@ -4,150 +4,168 @@ import CoreGraphics
 
 /// EXIF metadata extracted from an image
 struct EXIFMetadata: Equatable, Sendable {
-    var captureDate: Date?
-    var focalLength: Double?
-    var aperture: Double?
-    var shutterSpeed: String?
-    var iso: Int?
+    // Camera & lens
     var cameraModel: String?
     var lensMake: String?
     var lensModel: String?
+
+    // Exposure
+    var focalLength: Double?
+    var focalLength35mm: Double?
+    var aperture: Double?
+    var shutterSpeed: String?
+    var iso: Int?
+    var exposureCompensation: Double?
+    var flash: Bool?
+
+    // Image geometry
     var imageWidth: Int?
     var imageHeight: Int?
     var orientation: Int?
 
-    /// Human-readable aperture string (e.g., "f/2.8")
+    // File info (populated from the URL at read time)
+    var filename: String?
+    var fileSize: Int64?
+
+    // Date
+    var captureDate: Date?
+
+    // MARK: - Formatted strings
+
     var apertureString: String? {
-        guard let aperture = aperture else { return nil }
-        return String(format: "f/%.1f", aperture)
+        guard let a = aperture else { return nil }
+        return String(format: "f/%.1f", a)
     }
 
-    /// Human-readable focal length string (e.g., "50mm")
     var focalLengthString: String? {
-        guard let focalLength = focalLength else { return nil }
-        if focalLength == floor(focalLength) {
-            return String(format: "%.0fmm", focalLength)
-        }
-        return String(format: "%.1fmm", focalLength)
+        guard let f = focalLength else { return nil }
+        return f == floor(f) ? String(format: "%.0fmm", f) : String(format: "%.1fmm", f)
     }
 
-    /// Human-readable ISO string (e.g., "ISO 400")
     var isoString: String? {
-        guard let iso = iso else { return nil }
+        guard let iso else { return nil }
         return "ISO \(iso)"
     }
 
-    /// Summary string for overlay display
+    var exposureCompensationString: String? {
+        guard let ev = exposureCompensation, abs(ev) > 0.01 else { return nil }
+        return String(format: "%+.1f EV", ev)
+    }
+
+    var flashString: String? {
+        guard let f = flash else { return nil }
+        return f ? "On" : "Off"
+    }
+
+    /// 35mm equivalent focal length, only shown when meaningfully different from actual.
+    var focalLength35mmString: String? {
+        guard let f35 = focalLength35mm,
+              let fl = focalLength,
+              abs(f35 - fl) > 1 else { return nil }
+        return f35 == floor(f35) ? String(format: "%.0fmm equiv.", f35)
+                                 : String(format: "%.1fmm equiv.", f35)
+    }
+
+    var resolutionString: String? {
+        guard let w = imageWidth, let h = imageHeight, w > 0, h > 0 else { return nil }
+        let mp = Double(w * h) / 1_000_000
+        return "\(w) × \(h)  ·  \(String(format: "%.1f", mp)) MP"
+    }
+
+    var fileSizeString: String? {
+        guard let size = fileSize else { return nil }
+        if size >= 1_000_000 { return String(format: "%.1f MB", Double(size) / 1_000_000) }
+        if size >= 1_000     { return String(format: "%.0f KB", Double(size) / 1_000) }
+        return "\(size) B"
+    }
+
+    /// One-line exposure summary (focal • aperture • shutter • ISO).
     var summaryString: String {
-        var parts: [String] = []
-        if let focal = focalLengthString { parts.append(focal) }
-        if let ap = apertureString { parts.append(ap) }
-        if let shutter = shutterSpeed { parts.append(shutter) }
-        if let iso = isoString { parts.append(iso) }
-        return parts.joined(separator: " • ")
+        [focalLengthString, apertureString, shutterSpeed, isoString]
+            .compactMap { $0 }
+            .joined(separator: "  ·  ")
     }
 
-    /// Camera info string
-    var cameraString: String? {
-        cameraModel
-    }
+    var cameraString: String? { cameraModel }
 
-    /// Lens info string
-    var lensString: String? {
-        if let model = lensModel {
-            return model
-        }
-        return lensMake
+    var lensString: String? { lensModel ?? lensMake }
+
+    /// True when the overlay has at least something useful to show.
+    var hasAnyData: Bool {
+        cameraModel != nil || !summaryString.isEmpty ||
+        captureDate != nil || resolutionString != nil || fileSize != nil
     }
 }
 
 /// Reads EXIF metadata from image files
 enum EXIFReader {
-    /// Read EXIF metadata from an image URL
     static func read(from url: URL) -> EXIFMetadata {
-        var metadata = EXIFMetadata()
+        var m = EXIFMetadata()
 
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return metadata
+        m.filename = url.lastPathComponent
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int64 {
+            m.fileSize = size
         }
 
-        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
-            return metadata
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
+            return m
         }
 
-        // Basic image properties
-        metadata.imageWidth = properties[kCGImagePropertyPixelWidth as String] as? Int
-        metadata.imageHeight = properties[kCGImagePropertyPixelHeight as String] as? Int
-        metadata.orientation = properties[kCGImagePropertyOrientation as String] as? Int
+        m.imageWidth  = props[kCGImagePropertyPixelWidth  as String] as? Int
+        m.imageHeight = props[kCGImagePropertyPixelHeight as String] as? Int
+        m.orientation = props[kCGImagePropertyOrientation as String] as? Int
 
-        // EXIF dictionary
-        if let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] {
-            // Capture date
-            if let dateString = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
-                metadata.captureDate = parseEXIFDate(dateString)
+        if let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+            if let ds = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
+                m.captureDate = parseEXIFDate(ds)
             }
-
-            // Focal length
-            metadata.focalLength = exif[kCGImagePropertyExifFocalLength as String] as? Double
-
-            // Aperture (FNumber)
-            metadata.aperture = exif[kCGImagePropertyExifFNumber as String] as? Double
-
-            // Shutter speed (exposure time)
-            if let exposureTime = exif[kCGImagePropertyExifExposureTime as String] as? Double {
-                metadata.shutterSpeed = formatShutterSpeed(exposureTime)
+            m.focalLength   = exif[kCGImagePropertyExifFocalLength as String] as? Double
+            m.aperture      = exif[kCGImagePropertyExifFNumber     as String] as? Double
+            if let t = exif[kCGImagePropertyExifExposureTime as String] as? Double {
+                m.shutterSpeed = formatShutterSpeed(t)
             }
-
-            // ISO
-            if let isoArray = exif[kCGImagePropertyExifISOSpeedRatings as String] as? [Int],
-               let iso = isoArray.first {
-                metadata.iso = iso
+            if let arr = exif[kCGImagePropertyExifISOSpeedRatings as String] as? [Int] {
+                m.iso = arr.first
             }
-
-            // Lens model
-            metadata.lensModel = exif[kCGImagePropertyExifLensModel as String] as? String
-            metadata.lensMake = exif[kCGImagePropertyExifLensMake as String] as? String
+            m.exposureCompensation = exif[kCGImagePropertyExifExposureBiasValue  as String] as? Double
+            if let fv = exif[kCGImagePropertyExifFlash as String] as? Int {
+                m.flash = (fv & 0x01) != 0
+            }
+            if let f35 = exif[kCGImagePropertyExifFocalLenIn35mmFilm as String] {
+                m.focalLength35mm = (f35 as? Double) ?? (f35 as? Int).map(Double.init)
+            }
+            m.lensModel = exif[kCGImagePropertyExifLensModel as String] as? String
+            m.lensMake  = exif[kCGImagePropertyExifLensMake  as String] as? String
         }
 
-        // TIFF dictionary (camera info)
-        if let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
-            if let make = tiff[kCGImagePropertyTIFFMake as String] as? String,
-               let model = tiff[kCGImagePropertyTIFFModel as String] as? String {
-                // Clean up model string (often includes make already)
-                if model.lowercased().contains(make.lowercased()) {
-                    metadata.cameraModel = model
-                } else {
-                    metadata.cameraModel = "\(make) \(model)"
-                }
-            } else if let model = tiff[kCGImagePropertyTIFFModel as String] as? String {
-                metadata.cameraModel = model
+        if let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+            let make  = tiff[kCGImagePropertyTIFFMake  as String] as? String
+            let model = tiff[kCGImagePropertyTIFFModel as String] as? String
+            if let make, let model {
+                m.cameraModel = model.lowercased().contains(make.lowercased()) ? model : "\(make) \(model)"
+            } else {
+                m.cameraModel = model
             }
         }
 
-        return metadata
+        return m
     }
 
-    /// Parse EXIF date string format: "YYYY:MM:DD HH:MM:SS"
     private static func parseEXIFDate(_ string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.date(from: string)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.date(from: string)
     }
 
-    /// Format shutter speed as fraction (e.g., "1/250")
     private static func formatShutterSpeed(_ seconds: Double) -> String {
         if seconds >= 1 {
-            if seconds == floor(seconds) {
-                return String(format: "%.0fs", seconds)
-            }
-            return String(format: "%.1fs", seconds)
+            return seconds == floor(seconds) ? String(format: "%.0fs", seconds)
+                                             : String(format: "%.1fs", seconds)
         }
-
-        let denominator = 1.0 / seconds
-        if denominator >= 1 {
-            return String(format: "1/%.0f", denominator)
-        }
-        return String(format: "%.2fs", seconds)
+        let denom = 1.0 / seconds
+        return denom >= 1 ? String(format: "1/%.0f", denom) : String(format: "%.4fs", seconds)
     }
 }
