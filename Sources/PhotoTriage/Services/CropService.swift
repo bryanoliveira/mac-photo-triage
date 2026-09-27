@@ -194,12 +194,16 @@ actor CropService {
         let orientation = source.exifOrientation
         var cgImage = raw.applyingExifOrientation(orientation) ?? raw
 
-        // Apply tone adjustments via CoreImage (before geometric operations)
+        // Apply tone adjustments via CoreImage (before geometric operations). The tone math and
+        // the render both use the photo's own RGB space so wide-gamut (Adobe RGB / P3) files are
+        // not silently clipped to sRGB.
         if !adjustments.isIdentity {
-            let ciImage = CIImage(cgImage: cgImage)
-            let adjusted = adjustments.applyingCI(to: ciImage)
-            let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-            if let rendered = ciContext.createCGImage(adjusted, from: adjusted.extent) {
+            let space = cgImage.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
+                ?? CGColorSpace(name: CGColorSpace.sRGB)!
+            let adjusted = adjustments.applyingCI(to: CIImage(cgImage: cgImage), colorSpace: space,
+                                                  cubeDimension: 64)
+            if let rendered = CIContext.shared.createCGImage(adjusted, from: adjusted.extent,
+                                                             format: .RGBA8, colorSpace: space) {
                 cgImage = rendered
             }
         }
@@ -398,6 +402,12 @@ actor CropService {
         }
         return parts.joined(separator: ", ")
     }
+}
+
+extension CIContext {
+    /// One context for the whole app — creating a CIContext is expensive (it compiles and
+    /// caches GPU state), and contexts are safe to use from multiple threads.
+    static let shared = CIContext(options: [.cacheIntermediates: false])
 }
 
 /// Crop operation errors

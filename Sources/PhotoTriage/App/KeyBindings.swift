@@ -21,9 +21,12 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
     case applyCrop = "preview.applyCrop"
     case cancelCrop = "preview.cancelCrop"
     case trashCurrentImage = "preview.trash"
+    case keepCurrentImage = "preview.keep"
+    case clearDecision = "preview.clearDecision"
 
     // View toggles
     case toggleZoom = "view.toggleZoom"
+    case zoomActualSize = "view.zoomActualSize"
     case toggleEXIF = "view.toggleEXIF"
     case toggleClipping = "view.toggleClipping"
     case toggleGrid = "view.toggleGrid"
@@ -51,20 +54,23 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
     /// Human-readable name for display
     var displayName: String {
         switch self {
-        case .navigateLeft: return "Navigate Left"
-        case .navigateRight: return "Navigate Right"
-        case .candidateUp: return "Previous Candidate"
-        case .candidateDown: return "Next Candidate"
+        case .navigateLeft: return "Previous Photo"
+        case .navigateRight: return "Next Photo"
+        case .candidateUp: return "Previous Candidate / Row Up"
+        case .candidateDown: return "Next Candidate / Row Down"
         case .keepLeft: return "Keep Left"
         case .keepRight: return "Keep Right"
         case .keepBoth: return "Keep Both"
         case .keepNone: return "Keep None (Trash Both)"
         case .rotateCCW: return "Rotate 90° CCW"
         case .rotateCW: return "Rotate 90° CW"
-        case .applyCrop: return "Apply Crop"
+        case .applyCrop: return "Apply Edit / Open Photo"
         case .cancelCrop: return "Cancel / Back"
-        case .trashCurrentImage: return "Trash Current Image"
-        case .toggleZoom: return "Toggle Zoom"
+        case .trashCurrentImage: return "Trash Photo"
+        case .keepCurrentImage: return "Keep Photo"
+        case .clearDecision: return "Clear Keep/Trash Decision"
+        case .toggleZoom: return "Fit to Window / Open Photo"
+        case .zoomActualSize: return "Zoom to 100%"
         case .toggleEXIF: return "Toggle EXIF Overlay"
         case .toggleClipping: return "Toggle Clipping Warnings"
         case .toggleGrid: return "Toggle Guiding Grid"
@@ -78,8 +84,8 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
         case .redo: return "Redo"
         case .openFolder: return "Open Folder"
         case .emptyTrash: return "Empty Trash"
-        case .gridIncrease: return "Increase Grid Size"
-        case .gridDecrease: return "Decrease Grid Size"
+        case .gridIncrease: return "Zoom In / Larger Thumbnails"
+        case .gridDecrease: return "Zoom Out / Smaller Thumbnails"
         }
     }
 
@@ -90,9 +96,9 @@ enum KeyAction: String, CaseIterable, Identifiable, Codable {
             return "Navigation"
         case .keepLeft, .keepRight, .keepBoth, .keepNone:
             return "Triage Actions"
-        case .rotateCCW, .rotateCW, .applyCrop, .cancelCrop, .trashCurrentImage:
+        case .rotateCCW, .rotateCW, .applyCrop, .cancelCrop, .trashCurrentImage, .keepCurrentImage, .clearDecision:
             return "Preview"
-        case .toggleZoom, .toggleEXIF, .toggleClipping, .toggleGrid, .switchToTriage, .switchToGallery, .toggleFavorite:
+        case .toggleZoom, .zoomActualSize, .toggleEXIF, .toggleClipping, .toggleGrid, .switchToTriage, .switchToGallery, .toggleFavorite:
             return "View"
         case .openLeftPreview, .openRightPreview, .swapPair:
             return "Triage"
@@ -202,9 +208,12 @@ final class KeyBindings: ObservableObject {
         .applyCrop: KeyBinding(action: .applyCrop, key: "return", modifiers: []),
         .cancelCrop: KeyBinding(action: .cancelCrop, key: "escape", modifiers: []),
         .trashCurrentImage: KeyBinding(action: .trashCurrentImage, key: "delete", modifiers: []),
+        .keepCurrentImage: KeyBinding(action: .keepCurrentImage, key: "k", modifiers: []),
+        .clearDecision: KeyBinding(action: .clearDecision, key: "u", modifiers: []),
 
         // View
         .toggleZoom: KeyBinding(action: .toggleZoom, key: "space", modifiers: []),
+        .zoomActualSize: KeyBinding(action: .zoomActualSize, key: "z", modifiers: []),
         .toggleEXIF: KeyBinding(action: .toggleEXIF, key: "i", modifiers: []),
         .toggleClipping: KeyBinding(action: .toggleClipping, key: "w", modifiers: []),
         .toggleGrid: KeyBinding(action: .toggleGrid, key: "h", modifiers: []),

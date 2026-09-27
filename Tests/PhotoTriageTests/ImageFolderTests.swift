@@ -181,3 +181,23 @@ final class ImageFolderTests: XCTestCase {
         FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil)
     }
 }
+
+@MainActor
+final class ImageFolderSortingTests: XCTestCase {
+    func testDateSortIsStableAndDescendingIsReverse() async throws {
+        let dir = try TestImages.makeTempDirectory("ImageFolderSortingTests")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try TestImages.makeJPEG(at: dir.appendingPathComponent("b.jpg"), captureDate: "2024:01:01 10:00:00")
+        try TestImages.makeJPEG(at: dir.appendingPathComponent("a.jpg"), captureDate: "2024:01:01 10:00:00")
+        try TestImages.makeJPEG(at: dir.appendingPathComponent("c.jpg"), captureDate: "2024:01:01 09:00:00")
+
+        let folder = ImageFolder(folderURL: dir)
+        await folder.scan()
+        XCTAssertNotNil(folder.images.first?.exifMetadata, "EXIF is read during the scan")
+        XCTAssertEqual(folder.sortedImages.map(\.stem), ["c", "a", "b"], "ties broken by name")
+        folder.sort = .dateDescending
+        XCTAssertEqual(folder.sortedImages.map(\.stem), ["b", "a", "c"])
+        folder.filter = .kept
+        XCTAssertEqual(folder.sortedImages.count, 3, "sortedImages ignores the filter")
+    }
+}

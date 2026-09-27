@@ -144,6 +144,20 @@ final class ImageAsset: Identifiable, ObservableObject, Equatable, Hashable {
         objectWillChange.send()
     }
 
+    /// Current triage decision
+    var triageState: TriageState {
+        sentinelState.triageState
+    }
+
+    /// Set an exact triage state (keep/trash/reviewed/unreviewed), mirroring to the RAW partner
+    func setTriageState(_ state: TriageState) throws {
+        try sentinelState.apply(state)
+        if let rawURL = rawURL {
+            try sentinelState.copySentinels(to: rawURL)
+        }
+        objectWillChange.send()
+    }
+
     /// Refresh sentinel state from filesystem
     func refreshState() {
         sentinelState.refresh()

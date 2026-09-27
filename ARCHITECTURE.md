@@ -4,13 +4,13 @@
 
 - **Language**: Swift 5.9+
 - **UI Framework**: SwiftUI (primary) + AppKit interop for image manipulation and event handling
-- **Image handling**: ImageIO (decode, thumbnail generation, pixel dimensions), CGImage / CGContext (crop, rotation, clipping analysis), NSImage (display)
+- **Image handling**: ImageIO (decode, thumbnail generation, pixel dimensions), CGImage / CGContext (crop, rotation, clipping analysis), CoreImage (`CIColorCubeWithColorSpace` for tone/colour adjustments), NSImage (display)
 - **Hashing**: vImage (resize for dHash) + custom dHash implementation; CoreGraphics for color histogram
 - **Database**: SQLite via GRDB.swift (hash cache + progress state)
 - **File operations**: FileManager + NSWorkspace (macOS Trash)
 - **Minimum deployment**: macOS 14.0 (Sonoma)
 - **Build system**: Swift Package Manager (`build.sh`, `test.sh`, `make-app.sh`)
-- **Testing**: XCTest (unit); XCUITest stubs present (not yet exercised)
+- **Testing**: XCTest (unit, 150 tests); XCUITest stubs present (not yet exercised)
 
 ## Project Structure
 
@@ -22,65 +22,62 @@ photo-triage/
 ├── Package.swift                     # SPM manifest (depends on GRDB.swift 6.24+)
 ├── Sources/PhotoTriage/
 │   ├── App/
-│   │   ├── PhotoTriageApp.swift      # Entry point, WindowGroup, menu commands
-│   │   ├── AppState.swift            # Global @MainActor ObservableObject (all published state + undo stack)
+│   │   ├── PhotoTriageApp.swift      # Entry point, WindowGroup, menus, ContentView (toast, error banner, Empty Trash alert)
+│   │   ├── AppState.swift            # Global @MainActor ObservableObject: navigation, decisions, file edits, undo/redo
 │   │   └── KeyBindings.swift         # Configurable keyboard shortcut definitions + UserDefaults persistence
 │   ├── Models/
-│   │   ├── ImageAsset.swift          # Single image or JPEG+RAW pair; manages sentinel state
-│   │   ├── ImageFolder.swift         # Scans folder, pairs RAW+JPEG by stem, computes statistics
-│   │   ├── SentinelState.swift       # Read/write zero-byte sentinel files (.keep, .trash, .favorite, .reviewed)
+│   │   ├── ImageAsset.swift          # Single image or JPEG+RAW pair; manages sentinel state (setTriageState)
+│   │   ├── ImageFolder.swift         # Scans folder (reads EXIF up front), pairs RAW+JPEG, filter/sort, statistics
+│   │   ├── ImageAdjustments.swift    # Tone/colour slider values (Codable, v1 migration) + ToneMapper pixel math + LUT
+│   │   ├── SentinelState.swift       # TriageState enum; read/write zero-byte sentinel files (.keep, .trash, .favorite, .reviewed)
 │   │   ├── SimilarityEngine.swift    # dHash + color histogram + timestamp + aspect ranking
 │   │   ├── HashCache.swift           # SQLite persistence for hashes, histograms, pixel dimensions
-│   │   └── ProgressStore.swift       # Per-folder resume position (last view, anchor, preview index)
+│   │   └── ProgressStore.swift       # Per-folder resume position (last view, anchor, preview index, image path)
 │   ├── Views/
 │   │   ├── Gallery/
-│   │   │   ├── GalleryView.swift     # Thumbnail grid (LazyVGrid in ScrollViewReader), toolbar, filter/sort
-│   │   │   ├── GalleryThumbnail.swift # Thumbnail cell + AsyncThumbnail; uses asset.thumbnailVersion as task id
-│   │   │   └── DetailPanel.swift     # Sidebar: file info, EXIF, actions, Restore Original button
+│   │   │   ├── GalleryView.swift     # Grid, adaptive toolbar (ViewThatFits), status bar, context menu, keyboard culling
+│   │   │   ├── GalleryThumbnail.swift # Thumbnail cell (decision badges, trashed dimming) + AsyncThumbnail, via ImagePipeline
+│   │   │   └── DetailPanel.swift     # Sidebar: decision control, file info, EXIF, actions, Restore Original
 │   │   ├── Preview/
-│   │   │   ├── PreviewView.swift     # Single-image view; crop entry logic, rotation, restore, zoom reset
-│   │   │   ├── CropOverlay.swift     # Crop UI: handles, rotation strip, safe zone, dim canvas, mask
-│   │   │   └── RotationControls.swift # Legacy stub — not used in current UI
+│   │   │   ├── PreviewView.swift     # Single photo: status pill, DecisionControl, ZoomControls, adaptive toolbar, edit entry
+│   │   │   └── CropOverlay.swift     # Edit mode: crop handles, straighten, safe zone, tone sidebar, histogram, live clipping
 │   │   ├── Triage/
-│   │   │   ├── TriageView.swift      # Side-by-side layout with resizable HSplitView
-│   │   │   ├── ComparisonPane.swift  # Single pane: ControlledZoomableImageView + overlays + badges
-│   │   │   └── TriageControls.swift  # Action buttons (L/R/Both/None/Swap) + candidate filter picker
+│   │   │   ├── TriageView.swift      # Side-by-side panes, synced zoom, completion overlay, adaptive toolbar, divider
+│   │   │   ├── ComparisonPane.swift  # One pane: image + role/status/match% overlays
+│   │   │   └── TriageControls.swift  # Keep L/R/Both/None buttons, stats, TriageCompleteView
 │   │   ├── Shared/
-│   │   │   ├── ZoomableImageView.swift    # Self-contained pan/zoom (reloadToken, resetZoomToken); ControlledZoomableImageView for triage
+│   │   │   ├── ZoomableImageView.swift    # ZoomableImageCore (fit/100%/wheel/pinch/pan, full-res on demand) + ScrollWheelMonitor
+│   │   │   ├── DecisionBadge.swift        # Kept/Trashed/Unreviewed badge (icon + pill styles), ToastView
 │   │   │   ├── ClippingOverlay.swift      # Flashing red/blue overlay driven by ClippingAnalyzer
-│   │   │   ├── GuidingGridOverlay.swift   # Rule-of-thirds grid + center crosshair (Canvas, allowsHitTesting false)
+│   │   │   ├── GuidingGridOverlay.swift   # Rule-of-thirds grid + center crosshair
 │   │   │   ├── EXIFOverlay.swift          # Metadata badge overlay with position control
-│   │   │   ├── FavoriteButton.swift       # Star toggle in multiple sizes, used in all views
-│   │   │   ├── KeyboardHandler.swift      # NSEvent local monitor → KeyAction dispatch via ViewModifier
-│   │   │   └── ImageRenderer.swift        # NSImage display helper (minimal; most rendering uses SwiftUI Image)
+│   │   │   ├── FavoriteButton.swift       # Star toggle, thumbnail badges (one per corner), RAW badge
+│   │   │   └── KeyboardHandler.swift      # NSEvent local monitor → KeyAction dispatch; KeyEventMatcher (pure)
 │   │   └── Settings/
 │   │       └── ShortcutSettings.swift    # Preferences: rebind keys table, reset to defaults
 │   ├── Services/
-│   │   ├── CropService.swift         # Apply crop/rotation to JPEG, manage .photo-triage-originals/ backups
-│   │   ├── ClippingAnalyzer.swift    # Actor: builds red/blue clipping masks at ≤1024px; cached by URL
-│   │   ├── TrashService.swift        # Move files to macOS Trash via NSWorkspace.shared.recycle
-│   │   ├── ImageLoader.swift         # Thumbnail + full-res cache service (exists; not wired to current UI)
-│   │   ├── RAWDecoder.swift          # CoreImage RAW decode helper (exists; not wired to current UI)
-│   │   └── UndoService.swift         # Generic UndoableAction protocol (exists; undo is implemented in AppState)
+│   │   ├── CropService.swift         # Apply crop/rotation/tone to JPEG, backups in .photo-triage-originals/, CIContext.shared
+│   │   ├── EditHistory.swift         # EditSnapshot capture/restore — exact undo/redo for file edits
+│   │   ├── ImagePipeline.swift       # Off-main decoding, thumbnail/screen/full tiers, NSCache, prefetch, invalidation
+│   │   ├── ClippingAnalyzer.swift    # Actor: red/blue clipping masks from a URL (cached) or an in-memory CGImage
+│   │   └── TrashService.swift        # Move files to macOS Trash via NSWorkspace.shared.recycle
 │   └── Utilities/
 │       ├── DHash.swift               # Perceptual hash: 17×16 grayscale → 256-bit, Hamming distance
-│       ├── ColorHistogram.swift      # 16-bucket RGB histogram from 64px thumbnail; L1 distance
+│       ├── ColorHistogram.swift      # 16-bucket RGB signature from 64px thumbnail (similarity); L1 distance
+│       ├── Histogram.swift           # 256-bin RGB + luminance histogram + clip fractions (Edit sidebar)
 │       ├── EXIFReader.swift          # Extract EXIF metadata via ImageIO → EXIFMetadata struct
-│       └── FileExtensions.swift      # RAW/JPEG extension sets, URL helpers (.isJPEG, .stem, etc.)
+│       └── FileExtensions.swift      # RAW/JPEG extension sets, URL helpers, EXIF orientation helpers
 ├── Tests/PhotoTriageTests/
-│   ├── DHashTests.swift
-│   ├── ColorHistogramTests.swift
-│   ├── CropServiceTests.swift
-│   ├── SentinelStateTests.swift
-│   ├── ImageFolderTests.swift
-│   ├── KeyBindingsTests.swift
-│   ├── FileExtensionsTests.swift
-│   ├── SimilarityEngineTests.swift
-│   └── ProgressStoreTests.swift
-└── Tests/PhotoTriageUITests/
-    ├── GalleryUITests.swift          # Stub (XCTSkip — no fixture images yet)
-    ├── TriageUITests.swift           # Stub
-    └── PreviewUITests.swift          # Stub
+│   ├── AppStateTests.swift           # Preview auto-keep, filtered navigation, triage order, undo, file-edit undo
+│   ├── ToneMapperTests.swift         # Every adjustment curve, monotonicity, LUT layout, CI render, Codable migration
+│   ├── EditHistoryTests.swift        # Snapshot undo/redo incl. backup removal/recreation
+│   ├── ImagingUtilitiesTests.swift   # Histogram, clipping masks, ImagePipeline, TriageState sentinels
+│   ├── KeyEventMatcherTests.swift    # Shortcut matching ("+" with/without Shift), default binding collisions
+│   ├── TestSupport.swift             # Real-JPEG fixture helpers
+│   ├── DHashTests.swift, ColorHistogramTests.swift, CropServiceTests.swift, SentinelStateTests.swift,
+│   ├── ImageFolderTests.swift, KeyBindingsTests.swift, FileExtensionsTests.swift,
+│   └── SimilarityEngineTests.swift, ProgressStoreTests.swift
+└── Tests/PhotoTriageUITests/        # XCUITest stubs (XCTSkip — no fixture images / UI test target yet)
 ```
 
 ## Data Flow
@@ -104,12 +101,14 @@ AppState (@MainActor ObservableObject)
     │       and on .onChange(of: currentView) when returning from Preview/Triage
     │
     ├──▶ PreviewView
-    │       ZoomableImageView (reloadToken: cropVersion, resetZoomToken: zoomResetToken)
-    │       CropOverlay (url: cropSourceURL ?? displayURL, initialCropSizeHint: cropSizeHint)
+    │       ZoomableImageView (reloadToken: cropVersion, request: ZoomRequest)
+    │       CropOverlay (url: cropSourceURL ?? displayURL, initialCropHint, showClippingWarnings)
     │
     └──▶ TriageView
-            ControlledZoomableImageView per pane (shared scale/offset bindings)
+            ControlledZoomableImageView per pane (one shared ZoomState binding when synced)
             TriageControls + candidateFilter picker
+
+ImagePipeline (shared) ◀── every image view decodes through it; AppState prefetches neighbours
 ```
 
 ## AppState
@@ -122,23 +121,44 @@ AppState (@MainActor ObservableObject)
 | `currentView` | `AppView` | `.gallery`, `.preview`, or `.triage` |
 | `selectedAsset` | `ImageAsset?` | Selected item in gallery |
 | `previewAsset` | `ImageAsset?` | Image being previewed |
-| `triageAnchor` | `ImageAsset?` | Left pane in triage |
-| `triageCandidate` | `ImageAsset?` | Right pane in triage |
-| `candidateFilter` | `CandidateFilter` | Triage candidate score threshold |
+| `triageAnchor` / `triageCandidate` | `ImageAsset?` | Left / right pane in triage |
+| `triageFinished` | `Bool` | → ran past the last photo; shows the completion overlay |
+| `candidateFilter` | `CandidateFilter` | Triage candidate score threshold (persisted) |
 | `cropVersion` | `Int` | Incremented on every file edit; `ZoomableImageView` uses as `reloadToken` |
-| `showEXIFOverlay` | `Bool` | Global EXIF badge toggle |
-| `showClippingWarnings` | `Bool` | Global clipping warning toggle |
-| `showGuidingGrid` | `Bool` | Global guiding grid toggle |
-| `showDetailPanel` | `Bool` | Gallery sidebar toggle |
-| `galleryColumns` | `Int` | Grid column count (2–12) |
+| `showEXIFOverlay` / `showClippingWarnings` / `showGuidingGrid` | `Bool` | Global overlay toggles |
+| `showDetailPanel`, `galleryColumns`, `syncTriageZoom` | | Layout preferences (persisted in UserDefaults) |
+| `toast` | `String?` | Short confirmation message, auto-cleared after 1.6 s |
+| `showEmptyTrashConfirmation` | `Bool` | Drives the single Empty Trash alert in `ContentView` |
+| `canUndo` / `canRedo` | `Bool` | Published so buttons and menus update; `undoLabel` / `redoLabel` name the action |
 
-**Undo stack**: `[UndoAction]` with a matching redoStack. `UndoAction` cases:
-- `.markKept(ImageAsset)`, `.markTrashed(ImageAsset)`, `.toggleFavorite(ImageAsset)` — synchronous, reverse by clearing/toggling sentinel
-- `.triageDecision(anchor:candidate:anchorAction:candidateAction:)` — synchronous, reverses both
-- `.cropApplied(ImageAsset, CropRect, Double)` — async undo/redo via `CropService.restoreOriginal` / `applyCrop`
-- `.rotationApplied(ImageAsset, Bool)` — async undo/redo via `CropService.restoreOriginal` / `applyRotation`
+### Decisions
 
-On every file-modifying operation, `cropVersion += 1` and `asset.thumbnailVersion += 1` are both incremented.
+All keep/trash/clear changes go through `AppState` so they are undoable and produce a toast:
+
+- `setState(_:on:label:context:)` — any asset, any `TriageState` (detail panel, context menu)
+- `decideSelected(_:)` — gallery selection, then advances the selection
+- `keepPreviewImage()` / `trashPreviewImage()` / `clearPreviewImage()` — Preview; keep/trash advance
+- `nextPreviewImage()` / `previousPreviewImage()` — **auto-keep** the photo being left if it has no decision, then move. The target is resolved from the filtered list *before* the state change, because under "Unreviewed" the kept photo leaves the list
+- `AppState.neighbor(of:in:)` — next item, else previous (used after a photo leaves the filtered list)
+
+### Undo stack
+
+`[UndoAction]` with a matching redo stack:
+
+```swift
+struct StateChange { let asset: ImageAsset; let from: TriageState; let to: TriageState }
+enum UndoContext { case none, preview(ImageAsset), triage(anchor:, candidate:) }
+
+enum UndoAction {
+    case stateChange([StateChange], label: String, context: UndoContext)  // decisions, auto-keep, triage pairs
+    case toggleFavorite(ImageAsset)
+    case fileEdit(ImageAsset, before: EditSnapshot, after: EditSnapshot, label: String)
+}
+```
+
+- **State changes** record each asset's *previous* `TriageState`, so undo restores it exactly (a previously kept triage candidate returns to kept, not to unreviewed). Undo also restores the `context`: Preview jumps back to the photo, Triage restores the anchor/candidate pair.
+- **File edits** (crop + straighten + tone, 90° rotation, restore original) all run through `performFileEdit`: capture an `EditSnapshot` → run the `CropService` operation → capture another snapshot → push `.fileEdit`. Undo restores `before`, redo restores `after` (see **EditHistory**). Every edit, undo and redo calls `didModifyFile`, which invalidates `ImagePipeline` and `ClippingAnalyzer` caches, bumps `cropVersion` and `asset.thumbnailVersion`, and re-reads EXIF/dimensions.
+- Opening a folder or emptying the trash clears both stacks (entries would point at other or deleted files).
 
 **`showGallery()`**: before switching to `.gallery`, syncs `selectedAsset` from `previewAsset` or `triageAnchor` so the gallery always scrolls to the last-viewed image.
 
@@ -159,10 +179,61 @@ final class ImageAsset: Identifiable, ObservableObject, Equatable, Hashable {
     @Published var imageSize: CGSize?
     @Published var sentinelState: SentinelState
     @Published var thumbnailVersion: Int = 0  // Increment to force thumbnail reload
+
+    var triageState: TriageState               // .unreviewed / .reviewed / .kept / .trashed
+    func setTriageState(_ state: TriageState)  // writes sentinels, mirrors to the RAW partner
 }
 ```
 
 `thumbnailVersion` is incremented by `AppState` after every file edit (crop, rotation, undo, redo, restore). `GalleryThumbnail` uses `.task(id: asset.thumbnailVersion)` so only the affected image's thumbnail reloads — not the entire grid. `AsyncThumbnail` in `DetailPanel` accepts `reloadToken: asset.thumbnailVersion` for the same reason.
+
+## EditHistory
+
+`EditSnapshot` = a copy of the image file, a copy of its edit sidecar (if any), and whether the pristine backup existed. Snapshots live in a per-process temp directory (`$TMPDIR/PhotoTriage-Undo-<pid>`).
+
+- `capture(url)` — copy the current state
+- `restore(snapshot, to: url, originalIfMissing:)` — put the file and sidecar back; if the snapshot had **no** backup, the backup is deleted (undoing a photo's first edit makes "Restore Original" disappear again); if it expects a backup that is missing, the backup is recreated from `originalIfMissing` (redo of a first edit passes the `before` snapshot, which *is* the original)
+
+This replaces the old "undo = restore original / redo = re-run the crop" approach, which lost earlier edits (undoing a rotation after a crop dropped the crop) and re-ran crops without their tone adjustments.
+
+## ImagePipeline
+
+Singleton `ImagePipeline.shared`; all decoding happens in detached tasks with `kCGImageSourceShouldCacheImmediately`, never on the main thread (`NSImage(contentsOf:)` decoded lazily at first draw on the main thread, stalling every navigation).
+
+| Tier | Max pixel size | Used by |
+|------|----------------|---------|
+| `.thumbnail` | 512 | Gallery cells, detail panel, instant placeholder in Preview |
+| `.screen` | longest screen edge × backing scale, clamped 2048–5120 | Fit-to-window display, prefetch |
+| `.full` | native | Loaded only when zoomed past screen resolution |
+
+- Two `NSCache`s (thumbnails 256 MB, large 900 MB, cost = w×h×4); concurrent requests for the same key share one decode
+- `invalidate(url)` bumps a per-URL version that is part of every cache key, so edited files never show stale pixels
+- `prefetch(urls)` — Preview warms ±1/+2 neighbours; Triage warms the next candidate and the next anchor
+- `pixelSize(for:)` / `orientedPixelSize(url:)` — EXIF-orientation-aware dimensions from metadata only
+
+## ZoomableImageCore
+
+Shared by `ZoomableImageView` (Preview, owns its `ZoomState`) and `ControlledZoomableImageView` (Triage, binding — both panes get the same binding when zoom is synced).
+
+- `ZoomState { scale, offset }`, `scale` relative to fit (1 = fit, max 16). The image view is framed to the fitted size, then `scaleEffect` + `offset`
+- **100%** = `pixelWidth / (fittedWidth × displayScale)` — true actual pixels (the old "100%" was scale 1.0, i.e. identical to fit)
+- `setScale(_:around:)` keeps the image point under the pointer fixed: `offset' = t − (t − offset)/scale × scale'`; offsets are clamped so the image can't be dragged off-screen
+- Input: double-click (fit ↔ 100% at the click point), `MagnifyGesture` (around its start location), drag to pan, `ScrollWheelMonitor` (mouse wheel zooms around the pointer; trackpad two-finger scroll pans when zoomed; ⌘-scroll zooms), `ZoomRequest` commands (`.fit`, `.actualSize`, `.zoomIn`, `.zoomOut`) from keys and buttons
+- Reports the zoom percentage back to the Preview bottom bar
+
+## Tone mapping (ImageAdjustments / ToneMapper)
+
+`ImageAdjustments` holds slider values (all −1…+1 except exposure in EV). `ToneMapper` is the pure per-pixel implementation, operating on gamma-encoded RGB:
+
+1. decode sRGB → linear; white balance gains (temperature/tint, normalised to keep grey luminance)
+2. **exposure**: `y = x·2^EV`; for +EV a rational shoulder above knee k = 0.5: `y' = k + t/(1 + a·t)`, `t = y − k`, `a = (W−1)/((1−k)(W−k))`, `W = 2^EV` — C¹-continuous, maps W → 1, so nothing hard-clips
+3. **shadows / highlights** on perceptual luminance `L = encode(Y)`: `s(L) = L + a·L·(1 − L/e)³` for L < e = 0.7 (peak at e/4). Boost strength a = 3·amount, cut strength a = 0.9·amount; the slope stays positive (monotonic) for all values. Highlights use the same curve mirrored around white. The result is applied as the ratio `Y'/Y` to all three linear channels → hue and saturation preserved
+4. encode; per channel: levels (white point `1 − 0.30·whites`, black point `−0.15·blacks`), brightness gamma `p^(2^−amount)`, contrast S-curve pivoting at 0.5 with slope `2^amount`
+5. vibrance / saturation around Rec.709 luma
+
+`cubeData(dimension:)` samples `map` into an RGBA Float32 cube; `applyingCI(to:colorSpace:cubeDimension:)` applies it with `CIColorCubeWithColorSpace` in the photo's own RGB space. Export (`CropService.applyCrop`) uses 64³ and renders with `CIContext.shared` into the source colour space; the Edit preview uses 32³ on the ≤1500 px preview image.
+
+**Sidecar format**: `ImageAdjustments` encodes `version: 2`. Version-1 sidecars (CIColorControls-style values: contrast/saturation as multipliers, whites/blacks as raw level points) are converted on decode.
 
 ## CropService (actor)
 
@@ -213,6 +284,12 @@ Both edit paths funnel through `writeJPEG(_:to:metadataFrom:editNote:)`, which w
 - Checks if backup file exists (used to show/hide Restore Original button)
 
 ## CropOverlay
+
+### Live preview
+
+The ≤1500 px base `CGImage` is kept alongside the displayed `NSImage`. A `.task(id: PreviewRenderKey(adjustments, clipping, hasImage))` debounces for 12 ms, then renders in a detached task: tone LUT (32³) → `Histogram.compute` → `ClippingAnalyzer.buildMasks(from:)` when W is on. Because the task is keyed on the adjustments, a newer slider value cancels the older render, so a slow render can never overwrite a newer one (the previous implementation spawned an unkeyed task per change and round-tripped through TIFF with a fresh `CIContext` each time).
+
+While editing, `PreviewView` only accepts edit keys (Return, Esc, W); navigation/decision keys show a toast instead of silently discarding the edit.
 
 ### Visual Structure
 
@@ -289,7 +366,7 @@ When `PreviewView.enterCropMode()` detects a backup (`CropService().backupURL(fo
 
 ## GalleryThumbnail / AsyncThumbnail
 
-Both use `CGImageSourceCreateThumbnailAtIndex` directly (not `ImageLoader`).
+Both load through `ImagePipeline` (`.thumbnail` tier), so scrolling back through the grid reuses decoded thumbnails. Trashed photos render desaturated at 40% opacity; `ThumbnailBadges` places the decision icon top-left, favorite star top-right and RAW tag bottom-right.
 
 `GalleryThumbnail` uses `.task(id: asset.thumbnailVersion)` — re-fires whenever `thumbnailVersion` changes, which `AppState` increments on every file write to that specific asset. This ensures only the edited image reloads, not all thumbnails.
 
@@ -299,11 +376,16 @@ Both use `CGImageSourceCreateThumbnailAtIndex` directly (not `ImageLoader`).
 
 `GalleryView.gridView(for:)` wraps the `LazyVGrid` in a `ScrollViewReader`. Each thumbnail has `.id(asset.id)`.
 
-`scrollToSelected(proxy:)` calls `proxy.scrollTo(id, anchor: .center)` on the main queue with a 0.25s ease-in-out animation.
+`scrollToSelected(proxy:anchor:)` calls `proxy.scrollTo(id, anchor:)` on the main queue with a 0.2 s ease-in-out animation.
 
 Scroll fires on:
-- `.onAppear` — initial load or returning to gallery view
-- `.onChange(of: appState.currentView)` — triggers when switching back from Preview or Triage
+- `.onAppear` — initial load or returning to gallery view (centered)
+- `.onChange(of: appState.currentView)` — triggers when switching back from Preview or Triage (centered)
+- `.onChange(of: appState.selectedAsset?.id)` — keyboard navigation (anchor `nil` = minimal scroll)
+
+### Adaptive toolbars
+
+Gallery, Preview and Triage toolbars wrap several variants of the same row in `ViewThatFits(in: .horizontal)` (labels → icons → compact filter menu) and mark every control `.fixedSize()`. SwiftUI picks the first variant that fits, so controls are never compressed on top of each other (the old gallery toolbar gave pickers fixed frames narrower than their content, which overlapped neighbours, and let the statistics text wrap into a five-line column). Statistics moved to a bottom status bar.
 
 `AppState.showGallery()` sets `selectedAsset` from `previewAsset` or `triageAnchor` before changing `currentView`, so `selectedAsset` is always correct when the gallery fires the scroll.
 
@@ -361,10 +443,10 @@ JPEG sentinel is source of truth for a pair. RAW sentinels are mirrored automati
 
 `ClippingAnalyzer` (actor, singleton `ClippingAnalyzer.shared`):
 1. `CGImageSourceCreateThumbnailAtIndex` at ≤1024px — avoids decoding full-res RAW
-2. Renders into RGBA CGContext (premultiplied)
-3. Pixel walk: channels ≥ 252 → highlight (red mask), channels ≤ 3 → shadow (blue mask)
+2. `buildMasks(from: CGImage)` (also used directly by the Edit preview) renders into an RGBA CGContext
+3. Pixel walk: **any** channel ≥ 252 → highlight (red mask); **all** channels ≤ 3 → shadow (blue mask)
 4. Returns two `NSImage` masks
-5. Results cached by URL; `invalidate(url:)` clears on file edit
+5. Results cached by URL; `AppState.didModifyFile` calls `invalidate(url:)` after every edit, undo and redo
 
 `ClippingOverlay` (SwiftUI view):
 - Displays red + blue masks at `.opacity(0.9)`
@@ -380,26 +462,32 @@ Key events are intercepted via `NSEvent.addLocalMonitorForEvents(matching: .keyD
 
 The monitor is installed when the view enters a window and removed when it leaves. Only the active view (gallery / preview / triage) handles keys at any time.
 
-`focusedKeyboardHandler { action in Bool }` is a `ViewModifier` that translates raw `NSEvent` into typed `KeyAction` values using the user's `KeyBindings`.
+`focusedKeyboardHandler { action in Bool }` is a `ViewModifier` that translates raw `NSEvent` into typed `KeyAction` values using the user's `KeyBindings`. The monitor ignores events for other windows (Settings) and while a text field is first responder.
+
+Matching lives in the pure `KeyEventMatcher.matches(_:key:keyCode:modifiers:)`: special keys match by key code; single-symbol bindings without an explicit Shift ignore Shift, and "+" also accepts "=" (so the zoom/grid shortcut works on layouts where "+" needs Shift — previously it never fired). Views reuse actions by context: e.g. `.applyCrop` (Return) opens Preview in the gallery, `.gridIncrease` (+) zooms in Preview/Triage.
 
 ## Triage Decision Flow
 
+Triage walks `folder.sortedImages` — **every** photo in the gallery's sort order, ignoring the gallery filter, including kept and trashed photos.
+
 ```
 keepLeft()  → anchor .kept, candidate .trash → advanceToNextCandidate()
-keepBoth()  → anchor .kept, candidate .kept  → advanceToNextCandidate()
+keepBoth()  → anchor .kept, candidate .kept  → stay on the same pair
 keepRight() → candidate .kept, anchor .trash → candidate becomes anchor, updateCandidates()
 keepNone()  → both .trash                    → nextTriageAnchor()
+(each is one undoable .stateChange with both assets' previous states + the pair as context)
 
 advanceToNextCandidate(skipping: id):
   1. Rebuild candidate list from current anchor (excludes trashed; applies candidateFilter)
-  2. Find first candidate ≠ skipped id that isn't yet reviewed
-  3. If found → show it, anchor unchanged
-  4. If none  → nextTriageAnchor()
+  2. Pick the first candidate ≠ skipped id (kept/reviewed candidates stay eligible)
+  3. If none → nextTriageAnchor()
 
 nextTriageAnchor():
-  1. Auto-keep current anchor if not yet reviewed
-  2. Walk forward in folder.images to find next non-trashed, non-reviewed image
-  3. Set as new anchor, updateCandidates()
+  1. Auto-keep current anchor if it has no decision
+  2. Move to the next photo in sortedImages (any state)
+  3. Past the last photo → triageFinished = true (completion overlay; ← dismisses it)
+
+showTriage(from: nil): Preview photo / gallery selection → previous anchor → first unreviewed → first photo
 ```
 
 ## Progress Tracking
@@ -431,7 +519,7 @@ swift build -c release     # → .build/release/PhotoTriage
 # .app bundle (ad-hoc signed, double-clickable)
 ./make-app.sh              # → PhotoTriage.app
 
-# Unit tests (84 tests as of current build)
+# Unit tests (150 tests as of current build)
 swift test
 ```
 

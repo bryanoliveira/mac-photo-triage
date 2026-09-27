@@ -85,7 +85,8 @@ final class KeyBindingsTests: XCTestCase {
         XCTAssertEqual(KeyAction.keepRight.displayName, "Keep Right")
         XCTAssertEqual(KeyAction.toggleFavorite.displayName, "Toggle Favorite")
         XCTAssertEqual(KeyAction.emptyTrash.displayName, "Empty Trash")
-        XCTAssertEqual(KeyAction.trashCurrentImage.displayName, "Trash Current Image")
+        XCTAssertEqual(KeyAction.trashCurrentImage.displayName, "Trash Photo")
+        XCTAssertEqual(KeyAction.keepCurrentImage.displayName, "Keep Photo")
         XCTAssertEqual(KeyAction.toggleClipping.displayName, "Toggle Clipping Warnings")
     }
 

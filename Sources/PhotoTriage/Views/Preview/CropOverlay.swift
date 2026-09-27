@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ImageIO
+import CoreImage
 
 /// Edit overlay: crop handles, right sidebar with preset picker, horizon slider, and tone adjustments.
 struct CropOverlay: View {
@@ -12,11 +13,16 @@ struct CropOverlay: View {
     @Binding var adjustments: ImageAdjustments
     /// Exact crop rect (in original pixel space) to restore when re-entering Edit mode.
     var initialCropHint: CropRect? = nil
+    /// Show red/blue clipping on the *adjusted* preview
+    var showClippingWarnings: Bool = false
 
     // Base image (thumbnail at display resolution, EXIF-corrected)
     @State private var image: NSImage?
+    @State private var baseCGImage: CGImage?
     // CI-adjusted version of `image`, updated asynchronously when adjustments change
     @State private var adjustedImage: NSImage?
+    @State private var histogram: Histogram?
+    @State private var clippingMasks: ClippingAnalyzer.ClippingMasks?
     @State private var containerSize: CGSize = .zero
     @State private var dragStartCrop: CropRect?
     // True while the user holds the preview-original button or backtick key
@@ -70,7 +76,8 @@ struct CropOverlay: View {
                 preset: $preset,
                 fineRotation: $fineRotation,
                 adjustments: $adjustments,
-                showingOriginalPreview: $showingOriginalPreview
+                showingOriginalPreview: $showingOriginalPreview,
+                histogram: histogram
             )
             .frame(width: sidebarWidth)
             .background(Color(NSColor.windowBackgroundColor))
@@ -82,9 +89,9 @@ struct CropOverlay: View {
         .task(id: url) {
             cropRect = nil
             image = nil
+            baseCGImage = nil
             adjustedImage = nil
             await loadImage()
-            scheduleAdjustmentPreview(adjustments)
             if let hint = initialCropHint, imageSize.width > 0, imageSize.height > 0 {
                 let w = min(hint.width, imageSize.width)
                 let h = min(hint.height, imageSize.height)
@@ -95,7 +102,10 @@ struct CropOverlay: View {
                 cropRect = CropRect.fill(imageSize: imageSize, aspectRatio: preset.ratio)
             }
         }
-        .onChange(of: adjustments) { _, newAdj in scheduleAdjustmentPreview(newAdj) }
+        .task(id: PreviewRenderKey(adjustments: adjustments, clipping: showClippingWarnings,
+                                   hasImage: baseCGImage != nil)) {
+            await renderAdjustmentPreview()
+        }
         .onChange(of: preset)      { _, _ in adjustCropToPreset() }
         .onChange(of: fineRotation) { _, _ in clampCropToSafeBounds() }
     }
@@ -129,12 +139,23 @@ struct CropOverlay: View {
         }
     }
 
+    /// The adjusted image with (optional) clipping masks stacked exactly on top of it
+    @ViewBuilder
+    private func adjustedImageStack(_ img: NSImage) -> some View {
+        ZStack {
+            Image(nsImage: img).resizable()
+            if showClippingWarnings, let masks = clippingMasks {
+                Image(nsImage: masks.highlights).resizable().opacity(0.85)
+                Image(nsImage: masks.shadows).resizable().opacity(0.85)
+            }
+        }
+        .aspectRatio(img.size, contentMode: .fit)
+    }
+
     @ViewBuilder
     private var editLayer: some View {
         if let img = displayImage {
-            Image(nsImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
+            adjustedImageStack(img)
                 .rotationEffect(.degrees(fineRotation))
 
             if let crop = cropRect {
@@ -152,9 +173,7 @@ struct CropOverlay: View {
             if let crop = cropRect {
                 let displayCrop = toDisplay(crop)
                 let r = displayedImageRect
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
+                adjustedImageStack(img)
                     .rotationEffect(.degrees(fineRotation))
                     .mask {
                         Canvas { ctx, _ in
@@ -185,26 +204,54 @@ struct CropOverlay: View {
 
     // MARK: - Adjustment preview
 
-    private func scheduleAdjustmentPreview(_ adj: ImageAdjustments) {
-        guard let img = image else { adjustedImage = nil; return }
-        if adj.isIdentity { adjustedImage = img; return }
-        Task { @MainActor in
-            let result = await Task.detached(priority: .high) {
-                Self.ciAdjustedNSImage(img, adjustments: adj)
-            }.value
-            adjustedImage = result
-        }
+    /// Identity of one preview render; `.task(id:)` cancels the previous render when it changes,
+    /// so a slow render can never overwrite a newer one.
+    private struct PreviewRenderKey: Equatable {
+        let adjustments: ImageAdjustments
+        let clipping: Bool
+        let hasImage: Bool
     }
 
-    private nonisolated static func ciAdjustedNSImage(_ img: NSImage,
-                                                       adjustments: ImageAdjustments) -> NSImage {
-        guard let tiff = img.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let ciImage = CIImage(bitmapImageRep: bitmap) else { return img }
-        let adjusted = adjustments.applyingCI(to: ciImage)
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        guard let cgOut = context.createCGImage(adjusted, from: adjusted.extent) else { return img }
-        return NSImage(cgImage: cgOut, size: NSSize(width: cgOut.width, height: cgOut.height))
+    private func renderAdjustmentPreview() async {
+        guard let base = baseCGImage else { return }
+        // Coalesce rapid slider movement into one render per frame or so
+        try? await Task.sleep(nanoseconds: 12_000_000)
+        guard !Task.isCancelled else { return }
+
+        let adj = adjustments
+        let clipping = showClippingWarnings
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.renderPreview(base, adjustments: adj, clipping: clipping)
+        }.value
+        guard !Task.isCancelled else { return }
+        adjustedImage = adj.isIdentity ? image : NSImage(cgImage: result.image,
+                                                          size: NSSize(width: result.image.width, height: result.image.height))
+        histogram = result.histogram
+        clippingMasks = result.masks
+    }
+
+    private struct PreviewRender: @unchecked Sendable {
+        let image: CGImage
+        let histogram: Histogram
+        let masks: ClippingAnalyzer.ClippingMasks?
+    }
+
+    /// Apply adjustments to the preview-sized base image, plus its histogram and clipping masks.
+    private nonisolated static func renderPreview(_ base: CGImage, adjustments: ImageAdjustments,
+                                                  clipping: Bool) -> PreviewRender {
+        var output = base
+        if !adjustments.isIdentity {
+            let space = base.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
+                ?? CGColorSpace(name: CGColorSpace.sRGB)!
+            let adjusted = adjustments.applyingCI(to: CIImage(cgImage: base), colorSpace: space, cubeDimension: 32)
+            if let rendered = CIContext.shared.createCGImage(adjusted, from: adjusted.extent,
+                                                             format: .RGBA8, colorSpace: space) {
+                output = rendered
+            }
+        }
+        return PreviewRender(image: output,
+                             histogram: Histogram.compute(from: output),
+                             masks: clipping ? ClippingAnalyzer.buildMasks(from: output) : nil)
     }
 
     // MARK: - Crop decorations
@@ -403,6 +450,7 @@ struct CropOverlay: View {
                                                     : CGSize(width: thumbCG.width, height: thumbCG.height)
                     DispatchQueue.main.async {
                         self.image = nsImage
+                        self.baseCGImage = thumbCG
                         self.imageSize = size
                         continuation.resume()
                     }
@@ -419,6 +467,7 @@ struct CropOverlay: View {
                                                     : CGSize(width: cgImg.width, height: cgImg.height)
                     DispatchQueue.main.async {
                         self.image = nsImage
+                        self.baseCGImage = cgImg
                         self.imageSize = size
                         continuation.resume()
                     }
@@ -491,11 +540,19 @@ private struct EditSidebarPanel: View {
     @Binding var fineRotation: Double
     @Binding var adjustments: ImageAdjustments
     @Binding var showingOriginalPreview: Bool
+    let histogram: Histogram?
 
     var body: some View {
         VStack(spacing: 0) {
+            HistogramView(histogram: histogram)
+                .frame(height: 90)
+                .padding([.horizontal, .top], 12)
+                .padding(.bottom, 8)
+
+            Divider()
+
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 18) {
                     SidebarSection(title: "Crop") {
                         Picker("Aspect ratio", selection: $preset) {
                             ForEach(CropPreset.allCases) { p in
@@ -507,58 +564,106 @@ private struct EditSidebarPanel: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    SidebarSection(title: "Horizon") {
+                    SidebarSection(title: "Straighten") {
                         HStack(spacing: 8) {
-                            Button("-0.5°") { fineRotation = max(-15, fineRotation - 0.5) }
-                                .buttonStyle(.borderless).font(.caption)
-                            Slider(value: $fineRotation, in: -15...15, step: 0.1)
-                            Button("+0.5°") { fineRotation = min(15, fineRotation + 0.5) }
-                                .buttonStyle(.borderless).font(.caption)
+                            Button { fineRotation = max(-15, fineRotation - 0.5) } label: {
+                                Image(systemName: "rotate.left")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("−0.5°")
+                            // No `step:` — on macOS that draws a tick mark per step (300 here)
+                            Slider(value: Binding(get: { fineRotation },
+                                                  set: { fineRotation = ($0 * 10).rounded() / 10 }),
+                                   in: -15...15)
+                            Button { fineRotation = min(15, fineRotation + 0.5) } label: {
+                                Image(systemName: "rotate.right")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("+0.5°")
                         }
                         HStack {
                             Text(String(format: "%+.1f°", fineRotation))
                                 .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                             Spacer()
                             Button("Reset") { fineRotation = 0 }
-                                .buttonStyle(.borderless).font(.caption2).foregroundStyle(.secondary)
+                                .buttonStyle(.borderless).font(.caption2)
+                                .disabled(fineRotation == 0)
                         }
                     }
 
-                    SidebarSection(title: "Exposure") {
-                        AdjustmentRow(label: "Exposure",    value: $adjustments.exposure,
-                                      range: -2...2,     format: "%+.2f")
-                        AdjustmentRow(label: "Brightness",  value: $adjustments.brightness,
-                                      range: -0.5...0.5,  format: "%+.2f")
-                        AdjustmentRow(label: "Contrast",    value: $adjustments.contrast,
-                                      range: 0.5...1.5,   format: "%.2f")
-                        AdjustmentRow(label: "Highlights",  value: $adjustments.highlights,
-                                      range: -1...0,      format: "%+.2f")
-                        AdjustmentRow(label: "Shadows",     value: $adjustments.shadows,
-                                      range: -1...1,      format: "%+.2f")
-                        AdjustmentRow(label: "Whites",      value: $adjustments.whites,
-                                      range: 0.5...1.5,   format: "%.2f")
-                        AdjustmentRow(label: "Blacks",      value: $adjustments.blacks,
-                                      range: -0.5...0.5,  format: "%+.2f")
-                        AdjustmentRow(label: "Saturation",  value: $adjustments.saturation,
-                                      range: 0...2,       format: "%.2f")
-
-                        Button("Reset All") { adjustments.reset() }
-                            .buttonStyle(.borderless)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .disabled(adjustments.isIdentity)
+                    SidebarSection(title: "Light", onReset: resetLight, canReset: !lightIsIdentity) {
+                        AdjustmentRow(label: "Exposure", value: $adjustments.exposure, range: -3...3,
+                                      display: { String(format: "%+.2f", $0) },
+                                      help: "Brightens or darkens in linear light like changing the shutter speed; highlights roll off instead of clipping")
+                        AdjustmentRow(label: "Contrast", value: $adjustments.contrast,
+                                      help: "S-curve around mid-grey; never clips")
+                        AdjustmentRow(label: "Highlights", value: $adjustments.highlights,
+                                      help: "Drag left to recover detail in bright areas, right to brighten them")
+                        AdjustmentRow(label: "Shadows", value: $adjustments.shadows,
+                                      help: "Drag right to open up dark areas (keeps their colour), left to deepen them")
+                        AdjustmentRow(label: "Whites", value: $adjustments.whites,
+                                      help: "Sets the white point")
+                        AdjustmentRow(label: "Blacks", value: $adjustments.blacks,
+                                      help: "Sets the black point")
+                        AdjustmentRow(label: "Brightness", value: $adjustments.brightness,
+                                      help: "Midtone gamma — keeps pure black and white fixed")
                     }
+
+                    SidebarSection(title: "Color", onReset: resetColor, canReset: !colorIsIdentity) {
+                        AdjustmentRow(label: "Temp", value: $adjustments.temperature,
+                                      track: [.blue, .yellow], help: "White balance: cooler ↔ warmer")
+                        AdjustmentRow(label: "Tint", value: $adjustments.tint,
+                                      track: [.green, .pink], help: "White balance: green ↔ magenta")
+                        AdjustmentRow(label: "Vibrance", value: $adjustments.vibrance,
+                                      help: "Boosts muted colours more than already-saturated ones")
+                        AdjustmentRow(label: "Saturation", value: $adjustments.saturation,
+                                      help: "Uniform saturation")
+                    }
+
+                    Text("Double-click a slider's name to reset it.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
                 .padding(12)
             }
 
             Divider()
 
-            // Original-preview button — hold to compare, release to return
-            PreviewOriginalButton(isPressed: $showingOriginalPreview)
-                .padding(12)
+            HStack(spacing: 8) {
+                // Original-preview button — hold to compare, release to return
+                PreviewOriginalButton(isPressed: $showingOriginalPreview)
+                Button("Reset All") { adjustments.reset(); fineRotation = 0 }
+                    .disabled(adjustments.isIdentity && fineRotation == 0)
+                    .help("Reset tone, colour and straighten")
+            }
+            .padding(12)
         }
+    }
+
+    private var lightIsIdentity: Bool {
+        var a = adjustments
+        a.temperature = 0; a.tint = 0; a.vibrance = 0; a.saturation = 0
+        return a.isIdentity
+    }
+
+    private var colorIsIdentity: Bool {
+        adjustments.temperature == 0 && adjustments.tint == 0 && adjustments.vibrance == 0 && adjustments.saturation == 0
+    }
+
+    private func resetLight() {
+        let color = adjustments
+        adjustments.reset()
+        adjustments.temperature = color.temperature
+        adjustments.tint = color.tint
+        adjustments.vibrance = color.vibrance
+        adjustments.saturation = color.saturation
+    }
+
+    private func resetColor() {
+        adjustments.temperature = 0
+        adjustments.tint = 0
+        adjustments.vibrance = 0
+        adjustments.saturation = 0
     }
 }
 
@@ -566,37 +671,130 @@ private struct EditSidebarPanel: View {
 
 private struct SidebarSection<Content: View>: View {
     let title: String
+    var onReset: (() -> Void)? = nil
+    var canReset: Bool = false
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased())
-                .font(.caption2)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-                .tracking(1)
+            HStack {
+                Text(title.uppercased())
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .tracking(1)
+                Spacer()
+                if let onReset {
+                    Button("Reset", action: onReset)
+                        .buttonStyle(.borderless)
+                        .font(.caption2)
+                        .disabled(!canReset)
+                }
+            }
             content()
         }
     }
 }
 
+/// Labelled slider for one adjustment. Values are shown ×100 (−100…+100) except where a custom
+/// `display` is given (exposure in EV). Double-click the label to reset to 0.
 private struct AdjustmentRow: View {
     let label: String
     @Binding var value: Double
-    let range: ClosedRange<Double>
-    let format: String
+    var range: ClosedRange<Double> = -1...1
+    var display: (Double) -> String = { String(format: "%+.0f", $0 * 100) }
+    var track: [Color]? = nil
+    var help: String = ""
 
     var body: some View {
-        HStack {
-            Text(label)
-                .font(.caption)
-                .frame(width: 72, alignment: .leading)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(value == 0 ? .secondary : .primary)
+                Spacer()
+                Text(value == 0 ? "0" : display(value))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { value = 0 }
+
             Slider(value: $value, in: range)
-            Text(String(format: format, value))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 38, alignment: .trailing)
+                .controlSize(.small)
+                .background(alignment: .center) {
+                    if let track {
+                        LinearGradient(colors: track, startPoint: .leading, endPoint: .trailing)
+                            .frame(height: 3)
+                            .clipShape(Capsule())
+                            .opacity(0.6)
+                            .allowsHitTesting(false)
+                    }
+                }
         }
+        .help(help)
+    }
+}
+
+/// RGB + luminance histogram with highlight / shadow clipping indicators.
+private struct HistogramView: View {
+    let histogram: Histogram?
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.black.opacity(0.85))
+
+            if let h = histogram, h.pixelCount > 0 {
+                Canvas { ctx, size in
+                    let peak = Self.peak(h)
+                    func path(_ bins: [Int]) -> Path {
+                        var p = Path()
+                        p.move(to: CGPoint(x: 0, y: size.height))
+                        for (i, count) in bins.enumerated() {
+                            let x = CGFloat(i) / 255 * size.width
+                            let y = size.height - min(1, CGFloat(count) / peak) * (size.height - 4)
+                            p.addLine(to: CGPoint(x: x, y: y))
+                        }
+                        p.addLine(to: CGPoint(x: size.width, y: size.height))
+                        p.closeSubpath()
+                        return p
+                    }
+                    ctx.blendMode = .plusLighter
+                    ctx.fill(path(h.red), with: .color(.red.opacity(0.55)))
+                    ctx.fill(path(h.green), with: .color(.green.opacity(0.55)))
+                    ctx.fill(path(h.blue), with: .color(.blue.opacity(0.6)))
+                    ctx.blendMode = .normal
+                    ctx.stroke(path(h.luminance), with: .color(.white.opacity(0.7)), lineWidth: 1)
+                }
+                .padding(.horizontal, 4)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                HStack {
+                    clipIndicator(fraction: h.shadowClipFraction, color: .blue, label: "Shadows clipped")
+                    Spacer()
+                    clipIndicator(fraction: h.highlightClipFraction, color: .red, label: "Highlights clipped")
+                }
+                .padding(5)
+            } else {
+                ProgressView().controlSize(.small).frame(maxHeight: .infinity)
+            }
+        }
+        .accessibilityLabel("Histogram")
+    }
+
+    private func clipIndicator(fraction: Double, color: Color, label: String) -> some View {
+        let clipped = fraction > 0.0005
+        return Image(systemName: clipped ? "triangle.fill" : "triangle")
+            .font(.system(size: 8))
+            .foregroundStyle(clipped ? color : Color.white.opacity(0.35))
+            .help(clipped ? "\(label): \(String(format: "%.1f", fraction * 100))% of pixels (W shows where)" : "No clipping")
+    }
+
+    /// Scale to a robust peak (ignoring the extreme end bins, which spike on clipped images)
+    private static func peak(_ h: Histogram) -> CGFloat {
+        let inner = (1..<255).map { max(h.red[$0], h.green[$0], h.blue[$0], h.luminance[$0]) }
+        return CGFloat(max(inner.max() ?? 1, 1))
     }
 }
 

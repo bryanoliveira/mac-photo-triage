@@ -15,7 +15,7 @@ struct FavoriteButton: View {
             switch self {
             case .small: return 12
             case .medium: return 16
-            case .large: return 24
+            case .large: return 20
             }
         }
 
@@ -23,7 +23,7 @@ struct FavoriteButton: View {
             switch self {
             case .small: return 4
             case .medium: return 8
-            case .large: return 12
+            case .large: return 10
             }
         }
     }
@@ -35,16 +35,15 @@ struct FavoriteButton: View {
     }
 
     var body: some View {
-        Button(action: {
-            action()
-        }) {
+        Button(action: action) {
             Image(systemName: asset.isFavorite ? "star.fill" : "star")
-                .font(.system(size: size.iconSize))
-                .foregroundColor(asset.isFavorite ? .yellow : .gray)
+                .font(.system(size: size.iconSize, weight: .medium))
+                .foregroundColor(asset.isFavorite ? .yellow : .secondary)
+                .padding(size.padding)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .padding(size.padding)
-        .contentShape(Rectangle())
+        .help(asset.isFavorite ? "Remove from favorites (F)" : "Add to favorites (F)")
     }
 }
 
@@ -55,62 +54,34 @@ struct FavoriteBadge: View {
     var body: some View {
         if isFavorite {
             Image(systemName: "star.fill")
-                .font(.system(size: 10))
+                .font(.system(size: 12))
                 .foregroundColor(.yellow)
-                .shadow(color: .black.opacity(0.5), radius: 1, x: 0, y: 1)
-                .padding(4)
+                .shadow(color: .black.opacity(0.6), radius: 1.5, x: 0, y: 1)
         }
     }
 }
 
-/// State badge for thumbnails (keep/trash)
-struct StateBadge: View {
-    let asset: ImageAsset
-
-    var body: some View {
-        if asset.isTrashed {
-            Badge(text: "Trash", color: .red)
-        } else if asset.isKept {
-            Badge(text: "Keep", color: .green)
-        }
-    }
-
-    private struct Badge: View {
-        let text: String
-        let color: Color
-
-        var body: some View {
-            Text(text)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
-                .background(color.opacity(0.9))
-                .cornerRadius(3)
-        }
-    }
-}
-
-/// Combined badges overlay for thumbnails
+/// Combined badges overlay for thumbnails. Each corner holds one small icon so badges never
+/// collide, even at the densest grid setting.
 struct ThumbnailBadges: View {
     @ObservedObject var asset: ImageAsset
 
     var body: some View {
-        VStack {
-            HStack {
-                Spacer()
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 0) {
+                DecisionBadge(asset: asset, style: .icon)
+                Spacer(minLength: 0)
                 FavoriteBadge(isFavorite: asset.isFavorite)
             }
-            Spacer()
-            HStack {
-                StateBadge(asset: asset)
-                Spacer()
+            Spacer(minLength: 0)
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
                 if asset.isPair {
                     PairBadge()
                 }
             }
         }
-        .padding(4)
+        .padding(5)
     }
 }
 
@@ -122,7 +93,7 @@ struct PairBadge: View {
             .foregroundColor(.white)
             .padding(.horizontal, 3)
             .padding(.vertical, 1)
-            .background(Color.purple.opacity(0.8))
+            .background(Color.purple.opacity(0.85))
             .cornerRadius(2)
     }
 }

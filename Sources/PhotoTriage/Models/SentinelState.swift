@@ -11,6 +11,26 @@ enum SentinelType: String, CaseIterable {
     var fileExtension: String { rawValue }
 }
 
+/// The mutually exclusive triage decision for an image (favorite is tracked separately).
+enum TriageState: String, CaseIterable, Equatable, Codable {
+    case unreviewed
+    case reviewed   // reviewed without a keep/trash decision (legacy sentinel combination)
+    case kept
+    case trashed
+
+    var label: String {
+        switch self {
+        case .unreviewed: return "Unreviewed"
+        case .reviewed:   return "Reviewed"
+        case .kept:       return "Kept"
+        case .trashed:    return "Trashed"
+        }
+    }
+
+    /// Whether a keep/trash decision has been made
+    var isDecided: Bool { self == .kept || self == .trashed }
+}
+
 /// Manages sentinel files for marking image state
 /// Sentinel files are zero-byte files next to images: IMG_1234.JPG.keep, etc.
 struct SentinelState: Equatable {
@@ -99,6 +119,27 @@ struct SentinelState: Equatable {
     /// Toggle favorite state
     mutating func toggleFavorite() throws {
         try set(.favorite, value: !isFavorite)
+    }
+
+    /// Current triage decision derived from the sentinel flags
+    var triageState: TriageState {
+        if isTrash { return .trashed }
+        if isKeep { return .kept }
+        if isReviewed { return .reviewed }
+        return .unreviewed
+    }
+
+    /// Write the sentinel combination for `state` (used by undo to restore an exact prior state)
+    mutating func apply(_ state: TriageState) throws {
+        switch state {
+        case .unreviewed: try clearTriageState()
+        case .kept:       try markKept()
+        case .trashed:    try markTrashed()
+        case .reviewed:
+            try set(.keep, value: false)
+            try set(.trash, value: false)
+            try set(.reviewed, value: true)
+        }
     }
 
     /// Remove all sentinel files

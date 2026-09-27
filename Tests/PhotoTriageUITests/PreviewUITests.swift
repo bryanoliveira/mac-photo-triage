@@ -178,4 +178,39 @@ final class PreviewUITests: XCTestCase {
         // Reset button clears fine rotation back to 0°
         throw XCTSkip("Requires a test folder with images")
     }
+
+    // MARK: - Decision status & auto-keep
+
+    func testStatusPillShowsKeptTrashedOrUnreviewed() throws {
+        // The pill at the top-left of the photo and the Keep/Undecided/Trash control in the
+        // bottom bar both reflect the current photo's decision
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testArrowKeysKeepUndecidedPhoto() throws {
+        // ← / → mark the photo being left as kept (trashed photos stay trashed)
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testKeepAndClearShortcuts() throws {
+        // K keeps and advances; U clears the decision and stays
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    // MARK: - Zoom
+
+    func testZKeyTogglesActualSize() throws {
+        // Z zooms to 100% (actual pixels); pressing again fits
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testEditModeBlocksNavigation() throws {
+        // Arrow keys show "Apply or cancel the edit first" instead of discarding the edit
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testHistogramUpdatesWithAdjustments() throws {
+        // Moving Exposure/Highlights/Shadows updates the sidebar histogram and clip indicators
+        throw XCTSkip("Requires a test folder with images")
+    }
 }

@@ -76,6 +76,11 @@ final class ImageFolder: ObservableObject {
         return sortImages(filtered)
     }
 
+    /// Every image (ignoring the filter) in the current sort order — the order triage walks through
+    var sortedImages: [ImageAsset] {
+        sortImages(images)
+    }
+
     /// Images available for triage (not yet reviewed, not trashed)
     var triageableImages: [ImageAsset] {
         images.filter { !$0.isReviewed && !$0.isTrashed }
@@ -176,8 +181,28 @@ final class ImageFolder: ObservableObject {
             }
         }
 
-        // Sort by capture time initially
-        return assets.sorted { $0.compareByTime($1) }
+        // Read EXIF up front (metadata only — no pixel decode) so capture-time sorting is
+        // correct from the first frame instead of reshuffling once background loading finishes.
+        let urls = assets.map(\.displayURL)
+        let metadata = await Task.detached(priority: .userInitiated) { () -> [EXIFMetadata] in
+            // Each iteration writes only its own slot, so concurrent access is safe
+            nonisolated(unsafe) var results = [EXIFMetadata](repeating: EXIFMetadata(), count: urls.count)
+            let lock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: urls.count) { i in
+                let meta = EXIFReader.read(from: urls[i])
+                lock.withLock { results[i] = meta }
+            }
+            return results
+        }.value
+        for (asset, meta) in zip(assets, metadata) {
+            asset.exifMetadata = meta
+        }
+
+        // Sort by capture time initially (name breaks ties so the order is stable)
+        return assets.sorted {
+            let t0 = $0.captureTime ?? .distantPast, t1 = $1.captureTime ?? .distantPast
+            return t0 == t1 ? $0.stem.localizedStandardCompare($1.stem) == .orderedAscending : t0 < t1
+        }
     }
 
     private func createAsset(from urls: [URL]) -> ImageAsset {
@@ -202,12 +227,19 @@ final class ImageFolder: ObservableObject {
         }
     }
 
+    /// Capture-time order with filename as a tie-breaker (a strict weak ordering, unlike `!compareByTime`)
+    private static func dateOrder(_ a: ImageAsset, _ b: ImageAsset) -> Bool {
+        let t0 = a.captureTime ?? .distantPast, t1 = b.captureTime ?? .distantPast
+        if t0 != t1 { return t0 < t1 }
+        return a.stem.localizedStandardCompare(b.stem) == .orderedAscending
+    }
+
     private func sortImages(_ images: [ImageAsset]) -> [ImageAsset] {
         switch sort {
         case .dateAscending:
-            return images.sorted { $0.compareByTime($1) }
+            return images.sorted { Self.dateOrder($0, $1) }
         case .dateDescending:
-            return images.sorted { !$0.compareByTime($1) }
+            return images.sorted { Self.dateOrder($1, $0) }
         case .nameAscending:
             return images.sorted { $0.stem.localizedStandardCompare($1.stem) == .orderedAscending }
         case .nameDescending:
@@ -247,5 +279,10 @@ struct FolderStatistics: Equatable {
 
     var summary: String {
         "\(reviewed)/\(total) reviewed • \(kept) kept • \(trashed) trashed • \(favorites) favorites"
+    }
+
+    /// Short progress text for status bars, e.g. "12 of 340 reviewed (4%)"
+    var progressSummary: String {
+        "\(reviewed) of \(total) reviewed (\(Int((progress * 100).rounded()))%)"
     }
 }

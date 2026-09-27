@@ -4,66 +4,56 @@ import SwiftUI
 struct TriageControls: View {
     @EnvironmentObject var appState: AppState
 
+    private var hasPair: Bool {
+        appState.triageAnchor != nil && appState.triageCandidate != nil
+    }
+
     var body: some View {
-        HStack(spacing: 20) {
-            // Keep Left
-            TriageActionButton(
-                label: "Keep Left",
-                shortcut: "L",
-                icon: "arrow.left.circle.fill",
-                color: .blue,
-                action: { appState.keepLeft() }
-            )
-            .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
+        ViewThatFits(in: .horizontal) {
+            row(compact: false)
+            row(compact: true)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
 
-            // Keep Right
-            TriageActionButton(
-                label: "Keep Right",
-                shortcut: "R",
-                icon: "arrow.right.circle.fill",
-                color: .orange,
-                action: { appState.keepRight() }
-            )
-            .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
+    private func row(compact: Bool) -> some View {
+        HStack(spacing: compact ? 8 : 12) {
+            TriageActionButton(label: "Keep Left", shortcut: "L", icon: "arrow.left.circle.fill",
+                               color: .blue, compact: compact, help: "Keep the anchor, trash the candidate") {
+                appState.keepLeft()
+            }
+            TriageActionButton(label: "Keep Right", shortcut: "R", icon: "arrow.right.circle.fill",
+                               color: .orange, compact: compact, help: "Keep the candidate, trash the anchor") {
+                appState.keepRight()
+            }
 
-            Divider()
-                .frame(height: 40)
+            Divider().frame(height: 32)
 
-            // Keep Both
-            TriageActionButton(
-                label: "Keep Both",
-                shortcut: "B",
-                icon: "checkmark.circle.fill",
-                color: .green,
-                action: { appState.keepBoth() }
-            )
-            .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
+            TriageActionButton(label: "Keep Both", shortcut: "B", icon: "checkmark.circle.fill",
+                               color: .green, compact: compact, help: "Keep both photos") {
+                appState.keepBoth()
+            }
+            TriageActionButton(label: "Trash Both", shortcut: "N", icon: "trash.circle.fill",
+                               color: .red, compact: compact, help: "Mark both photos for trash") {
+                appState.keepNone()
+            }
 
-            // Keep None (Trash Both)
-            TriageActionButton(
-                label: "Trash Both",
-                shortcut: "N",
-                icon: "trash.circle.fill",
-                color: .red,
-                action: { appState.keepNone() }
-            )
-            .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
-
-            Spacer()
+            Spacer(minLength: 8)
 
             // Quick stats
             if let folder = appState.folder {
                 let stats = folder.statistics
-                HStack(spacing: 16) {
-                    StatBadge(label: "Kept", count: stats.kept, color: .green)
-                    StatBadge(label: "Trash", count: stats.trashed, color: .red)
-                    StatBadge(label: "Favorites", count: stats.favorites, color: .yellow)
+                HStack(spacing: 12) {
+                    StatBadge(label: compact ? "" : "kept", count: stats.kept, color: .green)
+                    StatBadge(label: compact ? "" : "trash", count: stats.trashed, color: .red)
+                    StatBadge(label: compact ? "" : "favorites", count: stats.favorites, color: .yellow)
                 }
+                .fixedSize()
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(Color(NSColor.windowBackgroundColor))
+        .disabled(!hasPair)
     }
 }
 
@@ -73,30 +63,43 @@ struct TriageActionButton: View {
     let shortcut: String
     let icon: String
     let color: Color
+    var compact: Bool = false
+    var help: String = ""
     let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 4) {
+            HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 24))
-                    .foregroundColor(color)
+                    .font(.system(size: 20))
+                    .foregroundStyle(isEnabled ? color : .secondary)
 
-                HStack(spacing: 4) {
+                if !compact {
                     Text(label)
-                        .font(.caption.bold())
-
-                    Text("(\(shortcut))")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .font(.callout.weight(.semibold))
                 }
+
+                Text(shortcut)
+                    .font(.caption.monospaced().weight(.semibold))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Color(NSColor.controlBackgroundColor).opacity(isHovering ? 1 : 0.7),
+                        in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(color.opacity(isHovering && isEnabled ? 0.6 : 0.15)))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
+        .onHover { isHovering = $0 }
+        .help("\(help) (\(shortcut))")
+        .fixedSize()
     }
 }
 
@@ -110,62 +113,66 @@ struct StatBadge: View {
         HStack(spacing: 4) {
             Circle()
                 .fill(color)
-                .frame(width: 8, height: 8)
+                .frame(width: 7, height: 7)
 
             Text("\(count)")
-                .font(.caption.bold())
+                .font(.caption.bold().monospacedDigit())
 
-            Text(label)
-                .font(.caption2)
-                .foregroundColor(.secondary)
+            if !label.isEmpty {
+                Text(label)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 }
 
-/// Completion message when all images triaged
+/// Shown when forward navigation runs past the last photo in triage
 struct TriageCompleteView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 64))
-                .foregroundColor(.green)
+        VStack(spacing: 18) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 52))
+                .foregroundStyle(.green)
 
-            Text("Triage Complete!")
-                .font(.title)
+            Text("You've reached the last photo")
+                .font(.title2.bold())
 
             if let folder = appState.folder {
                 let stats = folder.statistics
 
                 VStack(spacing: 8) {
-                    Text("\(stats.total) images reviewed")
-                        .font(.headline)
+                    Text(stats.progressSummary)
+                        .foregroundColor(.secondary)
 
-                    HStack(spacing: 20) {
-                        StatBadge(label: "Kept", count: stats.kept, color: .green)
-                        StatBadge(label: "Trashed", count: stats.trashed, color: .red)
-                        StatBadge(label: "Favorites", count: stats.favorites, color: .yellow)
+                    HStack(spacing: 18) {
+                        StatBadge(label: "kept", count: stats.kept, color: .green)
+                        StatBadge(label: "marked for trash", count: stats.trashed, color: .red)
+                        StatBadge(label: "favorites", count: stats.favorites, color: .yellow)
                     }
                 }
             }
 
-            HStack(spacing: 16) {
-                Button("Back to Gallery") {
-                    appState.showGallery()
-                }
-                .buttonStyle(.bordered)
+            HStack(spacing: 12) {
+                Button("Start Over") { appState.restartTriage() }
+                Button("Back to Gallery") { appState.showGallery() }
+                    .keyboardShortcut(.defaultAction)
 
-                if let folder = appState.folder, folder.statistics.trashed > 0 {
-                    Button("Empty Trash") {
-                        // Would trigger trash service
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                if appState.trashedCount > 0 {
+                    Button("Empty Trash…") { appState.requestEmptyTrash() }
+                        .tint(.red)
                 }
             }
+            .controlSize(.large)
+
+            Text("Press ← to go back to the last photo")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .padding(40)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(36)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(radius: 20)
     }
 }
