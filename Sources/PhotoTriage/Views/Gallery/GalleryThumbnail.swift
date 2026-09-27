@@ -7,74 +7,60 @@ struct GalleryThumbnail: View {
 
     @State private var image: NSImage?
     @State private var isLoading = true
+    @State private var isHovering = false
 
     var body: some View {
         ZStack {
-            // Thumbnail image
+            Color(NSColor.controlBackgroundColor)
+
+            // Thumbnail image — trashed photos are dimmed and desaturated so decisions read at a glance
             if let image = image {
                 Image(nsImage: image)
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fill)
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                     .clipped()
+                    .saturation(asset.isTrashed ? 0 : 1)
+                    .opacity(asset.isTrashed ? 0.4 : 1)
             } else if isLoading {
                 ProgressView()
-                    .scaleEffect(0.5)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(NSColor.controlBackgroundColor))
+                    .controlSize(.small)
             } else {
                 Image(systemName: "photo")
                     .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(NSColor.controlBackgroundColor))
             }
 
             // Badges overlay
             ThumbnailBadges(asset: asset)
         }
         .aspectRatio(1, contentMode: .fit)
-        .cornerRadius(4)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(isSelected ? Color.accentColor : Color.white.opacity(isHovering ? 0.35 : 0),
+                              lineWidth: isSelected ? 3 : 1)
         )
-        .shadow(color: isSelected ? Color.accentColor.opacity(0.3) : .clear, radius: 4)
+        .shadow(color: isSelected ? Color.accentColor.opacity(0.35) : .clear, radius: 4)
+        .onHover { isHovering = $0 }
+        .help(asset.displayName)
         .task(id: asset.thumbnailVersion) {
             await loadThumbnail()
         }
     }
 
     private func loadThumbnail() async {
-        isLoading = true
-        defer { isLoading = false }
-
-        let options: [CFString: Any] = [
-            kCGImageSourceThumbnailMaxPixelSize: 256,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let source = CGImageSourceCreateWithURL(asset.displayURL as CFURL, nil),
-                      let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-                    DispatchQueue.main.async {
-                        continuation.resume()
-                    }
-                    return
-                }
-
-                let nsImage = NSImage(cgImage: cgImage, size: NSSize(
-                    width: cgImage.width,
-                    height: cgImage.height
-                ))
-
-                DispatchQueue.main.async {
-                    self.image = nsImage
-                    continuation.resume()
-                }
-            }
+        let pipeline = ImagePipeline.shared
+        if let cached = pipeline.cachedImage(for: asset.displayURL, tier: .thumbnail) {
+            image = cached
+            isLoading = false
+            return
         }
+        isLoading = true
+        let loaded = await pipeline.image(for: asset.displayURL, tier: .thumbnail)
+        guard !Task.isCancelled else { return }
+        image = loaded
+        isLoading = false
     }
 }
 
@@ -92,53 +78,33 @@ struct AsyncThumbnail: View {
             if let image = image {
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
             } else if isLoading {
                 ProgressView()
-                    .scaleEffect(0.5)
+                    .controlSize(.small)
             } else {
                 Image(systemName: "photo")
                     .foregroundColor(.secondary)
             }
         }
-        .frame(width: size, height: size)
-        .background(Color(NSColor.controlBackgroundColor))
-        .clipped()
-        .task(id: reloadToken) {
+        .frame(maxWidth: size, maxHeight: size)
+        .task(id: "\(url.path)#\(reloadToken)") {
             await loadThumbnail()
         }
     }
 
     private func loadThumbnail() async {
-        isLoading = true
-        defer { isLoading = false }
-
-        let options: [CFString: Any] = [
-            kCGImageSourceThumbnailMaxPixelSize: size * 2,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                      let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-                    DispatchQueue.main.async {
-                        continuation.resume()
-                    }
-                    return
-                }
-
-                let nsImage = NSImage(cgImage: cgImage, size: NSSize(
-                    width: cgImage.width,
-                    height: cgImage.height
-                ))
-
-                DispatchQueue.main.async {
-                    self.image = nsImage
-                    continuation.resume()
-                }
-            }
+        let pipeline = ImagePipeline.shared
+        if let cached = pipeline.cachedImage(for: url, tier: .thumbnail) {
+            image = cached
+            isLoading = false
+            return
         }
+        isLoading = true
+        let loaded = await pipeline.image(for: url, tier: .thumbnail)
+        guard !Task.isCancelled else { return }
+        image = loaded
+        isLoading = false
     }
 }

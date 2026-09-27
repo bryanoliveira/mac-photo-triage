@@ -7,7 +7,9 @@ struct PreviewView: View {
     @EnvironmentObject var appState: AppState
 
     @State private var isEditing = false
-    @State private var zoomResetToken: Int = 0
+    @State private var isSaving = false
+    @State private var zoomRequest = ZoomRequest()
+    @State private var zoomPercent: Int?
     @State private var cropRect: CropRect?
     @State private var cropPreset: CropPreset = .free
     @State private var cropFineRotation: Double = 0
@@ -21,10 +23,11 @@ struct PreviewView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
             PreviewToolbar(
-                isEditing: $isEditing,
+                isEditing: isEditing,
+                isSaving: isSaving,
                 hasOriginalBackup: hasOriginalBackup,
+                canApply: cropRect != nil,
                 onRotateCCW: { applyRotation(clockwise: false) },
                 onRotateCW:  { applyRotation(clockwise: true) },
                 onEnterEdit: enterEditMode,
@@ -32,6 +35,7 @@ struct PreviewView: View {
                 onCancelEdit: cancelEditMode,
                 onRestoreOriginal: restoreOriginal
             )
+            Divider()
 
             // Main image view
             ZStack {
@@ -44,14 +48,16 @@ struct PreviewView: View {
                             imageSize: $imageSize,
                             fineRotation: $cropFineRotation,
                             adjustments: $imageAdjustments,
-                            initialCropHint: cropInitialHint
+                            initialCropHint: cropInitialHint,
+                            showClippingWarnings: appState.showClippingWarnings
                         )
                     } else {
                         ZoomableImageView(
                             url: asset.displayURL,
                             showClippingWarnings: appState.showClippingWarnings,
                             reloadToken: appState.cropVersion,
-                            resetZoomToken: zoomResetToken
+                            request: zoomRequest,
+                            onZoomPercentChange: { zoomPercent = $0 }
                         )
                         .overlay {
                             if appState.showGuidingGrid { GuidingGridOverlay() }
@@ -61,30 +67,28 @@ struct PreviewView: View {
                             isVisible: appState.showEXIFOverlay,
                             position: .bottomLeading
                         )
-                    }
-
-                    // Favorite button
-                    VStack {
-                        HStack {
-                            Spacer()
-                            FavoriteButton(asset: asset, size: .large) {
-                                appState.toggleFavorite(on: asset)
-                            }
-                            .background(.ultraThinMaterial, in: Circle())
+                        .overlay(alignment: .top) {
+                            imageOverlayBar(for: asset)
                         }
-                        Spacer()
                     }
-                    .padding()
                 } else {
-                    Text("No image selected")
-                        .foregroundColor(.secondary)
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 40, weight: .light))
+                        Text("No photo to show")
+                            .font(.headline)
+                        Button("Back to Gallery") { appState.showGallery() }
+                    }
+                    .foregroundColor(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
 
-            // Navigation bar
-            PreviewNavigationBar()
+            if !isEditing {
+                Divider()
+                PreviewNavigationBar(zoomPercent: zoomPercent, zoomRequest: $zoomRequest)
+            }
         }
         .focusedKeyboardHandler { action in
             handleKeyAction(action)
@@ -101,75 +105,105 @@ struct PreviewView: View {
         .onChange(of: appState.cropVersion) { _, _ in checkBackup() }
     }
 
+    /// Status pill (top-left) and favorite star (top-right) floating over the photo
+    private func imageOverlayBar(for asset: ImageAsset) -> some View {
+        HStack(alignment: .top) {
+            DecisionBadge(asset: asset, style: .pill, showUnreviewed: true)
+                .animation(.easeInOut(duration: 0.15), value: asset.triageState)
+            Spacer()
+            FavoriteButton(asset: asset, size: .large) {
+                appState.toggleFavorite(on: asset)
+            }
+            .background(.ultraThinMaterial, in: Circle())
+        }
+        .padding(12)
+    }
+
     // MARK: - Key handling
 
     private func handleKeyAction(_ action: KeyAction) -> Bool {
+        if isEditing {
+            // While editing, only edit-related keys are live; navigation/decisions would
+            // silently discard the unsaved edit.
+            switch action {
+            case .applyCrop:
+                applyEdit()
+            case .cancelCrop:
+                cancelEditMode()
+            case .toggleClipping:
+                appState.showClippingWarnings.toggle()
+            case .navigateLeft, .navigateRight, .trashCurrentImage, .keepCurrentImage, .clearDecision,
+                 .switchToGallery, .switchToTriage, .rotateCCW, .rotateCW:
+                appState.showToast("Apply or cancel the edit first")
+            default:
+                return false
+            }
+            return true
+        }
+
         switch action {
         case .navigateLeft:
             appState.previousPreviewImage()
-            return true
         case .navigateRight:
             appState.nextPreviewImage()
-            return true
         case .rotateCCW:
             applyRotation(clockwise: false)
-            return true
         case .rotateCW:
             applyRotation(clockwise: true)
-            return true
         case .toggleZoom:
-            zoomResetToken += 1
-            return true
+            zoomRequest.send(.fit)
+        case .zoomActualSize:
+            zoomRequest.send(zoomPercent == 100 ? .fit : .actualSize)
+        case .gridIncrease:
+            zoomRequest.send(.zoomIn)
+        case .gridDecrease:
+            zoomRequest.send(.zoomOut)
         case .toggleEXIF:
             appState.showEXIFOverlay.toggle()
-            return true
         case .toggleClipping:
             appState.showClippingWarnings.toggle()
-            return true
         case .toggleGrid:
             appState.showGuidingGrid.toggle()
-            return true
         case .switchToGallery:
             appState.showGallery()
-            return true
         case .switchToTriage:
             if let asset = appState.previewAsset {
                 appState.showTriage(from: asset)
             }
-            return true
         case .toggleFavorite:
             if let asset = appState.previewAsset {
                 appState.toggleFavorite(on: asset)
             }
-            return true
         case .trashCurrentImage:
             appState.trashPreviewImage()
-            return true
+        case .keepCurrentImage:
+            appState.keepPreviewImage()
+        case .clearDecision:
+            appState.clearPreviewImage()
         case .applyCrop:
-            if isEditing { applyEdit() }
-            return true
+            enterEditMode()
         case .cancelCrop:
-            if isEditing {
-                cancelEditMode()
-            } else {
-                appState.showGallery()
-            }
-            return true
+            appState.showGallery()
         case .undo:
             appState.undo()
-            return true
         case .redo:
             appState.redo()
-            return true
+        case .emptyTrash:
+            appState.requestEmptyTrash()
         default:
             return false
         }
+        return true
     }
 
     // MARK: - Actions
 
     private func enterEditMode() {
         guard let asset = appState.previewAsset else { return }
+        guard asset.displayURL.isJPEG else {
+            appState.errorMessage = CropError.rawNotSupported.localizedDescription
+            return
+        }
         let service = CropService()
         let backup = service.backupURL(for: asset.displayURL)
         if FileManager.default.fileExists(atPath: backup.path) {
@@ -204,25 +238,13 @@ struct PreviewView: View {
 
     /// Compute a crop rect centered on the original, matching the current image's display dimensions.
     private func centeredCropHint(currentURL: URL, originalURL: URL) -> CropRect? {
-        guard let curr = displayPixelSize(for: currentURL),
-              let orig = displayPixelSize(for: originalURL) else { return nil }
+        guard let curr = ImagePipeline.orientedPixelSize(url: currentURL),
+              let orig = ImagePipeline.orientedPixelSize(url: originalURL) else { return nil }
         let cx = (orig.width - curr.width) / 2
         let cy = (orig.height - curr.height) / 2
         return CropRect(x: max(0, cx), y: max(0, cy),
                         width: min(curr.width, orig.width),
                         height: min(curr.height, orig.height))
-    }
-
-    /// Pixel dimensions in display space (EXIF orientation applied — may swap W/H).
-    private func displayPixelSize(for url: URL) -> CGSize? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
-              let h = props[kCGImagePropertyPixelHeight] as? CGFloat else { return nil }
-        switch source.exifOrientation {
-        case .right, .left, .rightMirrored, .leftMirrored: return CGSize(width: h, height: w)
-        default: return CGSize(width: w, height: h)
-        }
     }
 
     /// Load EXIF for `asset` on a background thread if not already cached.
@@ -236,51 +258,27 @@ struct PreviewView: View {
     }
 
     private func applyRotation(clockwise: Bool) {
-        guard let asset = appState.previewAsset else { return }
-        Task {
-            let service = CropService()
-            do {
-                _ = try await service.applyRotation(to: asset.displayURL, clockwise: clockwise)
-                appState.recordRotationApplied(to: asset, clockwise: clockwise)
-            } catch {
-                appState.errorMessage = error.localizedDescription
-            }
-        }
+        guard let asset = appState.previewAsset, !isEditing else { return }
+        Task { await appState.rotate(asset, clockwise: clockwise) }
     }
 
     private func applyEdit() {
-        guard let asset = appState.previewAsset,
-              let crop = cropRect else { return }
-
+        guard let asset = appState.previewAsset, let crop = cropRect, !isSaving else { return }
+        isSaving = true
         let fineRot = cropFineRotation
         let adj = imageAdjustments
         let src = cropSourceURL
         Task {
-            let service = CropService()
-            do {
-                _ = try await service.applyCrop(to: asset.displayURL, cropRect: crop,
-                                                rotation: fineRot, adjustments: adj, sourceURL: src)
-                appState.recordCropApplied(to: asset, cropRect: crop, rotation: fineRot)
-                cancelEditMode()
-            } catch {
-                appState.errorMessage = error.localizedDescription
-            }
+            let ok = await appState.applyEdit(to: asset, cropRect: crop, rotation: fineRot,
+                                              adjustments: adj, sourceURL: src)
+            isSaving = false
+            if ok { cancelEditMode() }
         }
     }
 
     private func restoreOriginal() {
         guard let asset = appState.previewAsset else { return }
-        Task {
-            let service = CropService()
-            do {
-                try await service.restoreOriginal(for: asset.displayURL)
-                appState.cropVersion += 1
-                asset.thumbnailVersion += 1
-                hasOriginalBackup = false
-            } catch {
-                appState.errorMessage = error.localizedDescription
-            }
-        }
+        Task { await appState.restoreOriginal(asset) }
     }
 
     private func checkBackup() {
@@ -296,11 +294,13 @@ struct PreviewView: View {
 
 // MARK: - Toolbar
 
-/// Preview toolbar with rotation and edit controls
+/// Preview toolbar with rotation and edit controls. Collapses to icons on narrow windows.
 struct PreviewToolbar: View {
     @EnvironmentObject var appState: AppState
-    @Binding var isEditing: Bool
+    let isEditing: Bool
+    let isSaving: Bool
     let hasOriginalBackup: Bool
+    let canApply: Bool
     var onRotateCCW: () -> Void = {}
     var onRotateCW: () -> Void = {}
     var onEnterEdit: () -> Void = {}
@@ -309,144 +309,266 @@ struct PreviewToolbar: View {
     var onRestoreOriginal: () -> Void = {}
 
     var body: some View {
-        HStack {
-            // Back button
-            Button(action: { appState.showGallery() }) {
-                Label("Gallery", systemImage: "square.grid.2x2")
-            }
-
-            Divider().frame(height: 20)
-
-            // Undo / Redo
-            Button(action: { appState.undo() }) {
-                Image(systemName: "arrow.uturn.backward")
-            }
-            .disabled(!appState.canUndo)
-            .help("Undo (Cmd+Z)")
-
-            Button(action: { appState.redo() }) {
-                Image(systemName: "arrow.uturn.forward")
-            }
-            .disabled(!appState.canRedo)
-            .help("Redo (Cmd+Shift+Z)")
-
-            Divider().frame(height: 20)
-
-            // 90° rotation — baked to file immediately
-            Button(action: onRotateCCW) {
-                Image(systemName: "rotate.left")
-            }
-            .help("Rotate 90° CCW — saved to file (Cmd+Left)")
-            .disabled(isEditing)
-
-            Button(action: onRotateCW) {
-                Image(systemName: "rotate.right")
-            }
-            .help("Rotate 90° CW — saved to file (Cmd+Right)")
-            .disabled(isEditing)
-
-            Divider().frame(height: 20)
-
-            // Restore original
-            if hasOriginalBackup {
-                Button(action: onRestoreOriginal) {
-                    Label("Restore Original", systemImage: "arrow.counterclockwise")
-                }
-                .help("Restore the unedited original file")
-                .disabled(isEditing)
-
-                Divider().frame(height: 20)
-            }
-
-            // Edit button
-            Button(action: { if isEditing { onCancelEdit() } else { onEnterEdit() } }) {
-                Label(isEditing ? "Editing…" : "Edit", systemImage: "slider.horizontal.3")
-            }
-            .help("Toggle Edit Mode (crop, horizon, exposure)")
-
-            if isEditing {
-                Button("Apply", action: onApplyEdit)
-                Button("Cancel", action: onCancelEdit)
-            }
-
-            Spacer()
-
-            // EXIF toggle
-            Button(action: { appState.showEXIFOverlay.toggle() }) {
-                Image(systemName: appState.showEXIFOverlay ? "info.circle.fill" : "info.circle")
-            }
-            .help("Toggle EXIF (I)")
-
-            // Guiding grid toggle
-            Button(action: { appState.showGuidingGrid.toggle() }) {
-                Image(systemName: "grid")
-                    .foregroundStyle(appState.showGuidingGrid ? .blue : .primary)
-            }
-            .help("Toggle guiding grid (H)")
-            .disabled(isEditing)
-
-            // Clipping warnings toggle
-            Button(action: { appState.showClippingWarnings.toggle() }) {
-                Image(systemName: appState.showClippingWarnings
-                    ? "exclamationmark.triangle.fill"
-                    : "exclamationmark.triangle")
-                .foregroundStyle(appState.showClippingWarnings ? .yellow : .primary)
-            }
-            .help("Toggle Clipping Warnings (W)")
-
-            // Trash button
-            Button(action: { appState.trashPreviewImage() }) {
-                Image(systemName: "trash")
-                    .foregroundStyle(.red)
-            }
-            .help("Trash this image (Delete)")
-            .disabled(appState.previewAsset == nil)
-
-            // Triage button
-            Button(action: {
-                if let asset = appState.previewAsset {
-                    appState.showTriage(from: asset)
-                }
-            }) {
-                Label("Triage", systemImage: "square.split.2x1")
-            }
+        ViewThatFits(in: .horizontal) {
+            row(compact: false)
+            row(compact: true)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color(NSColor.windowBackgroundColor))
     }
+
+    private func row(compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            ToolbarButton(title: "Gallery", systemImage: "square.grid.2x2", compact: compact,
+                          help: "Back to Gallery (G)") { appState.showGallery() }
+                .disabled(isEditing)
+
+            Divider().frame(height: 18)
+
+            ToolbarButton(title: "Undo", systemImage: "arrow.uturn.backward", compact: true,
+                          help: appState.undoLabel.map { "Undo \($0) (⌘Z)" } ?? "Undo (⌘Z)") { appState.undo() }
+                .disabled(!appState.canUndo || isEditing)
+            ToolbarButton(title: "Redo", systemImage: "arrow.uturn.forward", compact: true,
+                          help: appState.redoLabel.map { "Redo \($0) (⌘⇧Z)" } ?? "Redo (⌘⇧Z)") { appState.redo() }
+                .disabled(!appState.canRedo || isEditing)
+
+            Divider().frame(height: 18)
+
+            ToolbarButton(title: "Rotate Left", systemImage: "rotate.left", compact: true,
+                          help: "Rotate 90° left — saved to file (⌘←)", action: onRotateCCW)
+                .disabled(isEditing)
+            ToolbarButton(title: "Rotate Right", systemImage: "rotate.right", compact: true,
+                          help: "Rotate 90° right — saved to file (⌘→)", action: onRotateCW)
+                .disabled(isEditing)
+
+            Divider().frame(height: 18)
+
+            if isEditing {
+                Button("Cancel", action: onCancelEdit)
+                    .keyboardShortcut(.cancelAction)
+                    .fixedSize()
+                Button(action: onApplyEdit) {
+                    if isSaving {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Apply")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canApply || isSaving)
+                .help("Save crop, horizon and tone changes to the file (↩)")
+                .fixedSize()
+            } else {
+                ToolbarButton(title: "Edit", systemImage: "slider.horizontal.3", compact: compact,
+                              help: "Crop, straighten and adjust tone (↩)", action: onEnterEdit)
+                    .disabled(appState.previewAsset?.displayURL.isJPEG != true)
+
+                if hasOriginalBackup {
+                    ToolbarButton(title: "Restore Original", systemImage: "arrow.counterclockwise", compact: compact,
+                                  help: "Replace the edited file with the unedited original (undoable)",
+                                  action: onRestoreOriginal)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            ToggleIconButton(isOn: appState.showEXIFOverlay, systemImage: "info.circle",
+                             help: "Photo info (I)") { appState.showEXIFOverlay.toggle() }
+                .disabled(isEditing)
+            ToggleIconButton(isOn: appState.showGuidingGrid, systemImage: "grid",
+                             help: "Guiding grid (H)") { appState.showGuidingGrid.toggle() }
+                .disabled(isEditing)
+            ToggleIconButton(isOn: appState.showClippingWarnings, systemImage: "exclamationmark.triangle",
+                             help: "Clipping warnings — red: blown highlights, blue: crushed shadows (W)") {
+                appState.showClippingWarnings.toggle()
+            }
+
+            Divider().frame(height: 18)
+
+            ToolbarButton(title: "Triage", systemImage: "square.split.2x1", compact: compact,
+                          help: "Compare with similar photos (T)") {
+                if let asset = appState.previewAsset { appState.showTriage(from: asset) }
+            }
+            .disabled(isEditing)
+        }
+    }
 }
 
 // MARK: - Navigation bar
 
-/// Bottom navigation bar showing position
+/// Bottom bar: previous/next, keep/trash decision, position and zoom.
 struct PreviewNavigationBar: View {
     @EnvironmentObject var appState: AppState
+    let zoomPercent: Int?
+    @Binding var zoomRequest: ZoomRequest
 
     var body: some View {
-        HStack {
+        ViewThatFits(in: .horizontal) {
+            row(showName: true)
+            row(showName: false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private func row(showName: Bool) -> some View {
+        HStack(spacing: 12) {
             Button(action: { appState.previousPreviewImage() }) {
                 Image(systemName: "chevron.left")
+                    .frame(width: 18)
             }
-            .disabled(appState.previewIndex == 0)
+            .help("Previous photo (←) — keeps the current photo if undecided")
+            .disabled(appState.previewPosition?.index == 0)
 
-            Spacer()
-
-            if let folder = appState.folder {
-                Text("\(appState.previewIndex + 1) / \(folder.filteredImages.count)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            if let asset = appState.previewAsset {
+                DecisionControl(asset: asset)
+                    .fixedSize()
             }
 
-            Spacer()
+            Spacer(minLength: 8)
+
+            VStack(spacing: 1) {
+                if let pos = appState.previewPosition {
+                    Text("\(pos.index + 1) of \(pos.count)")
+                        .font(.caption.monospacedDigit())
+                } else if let folder = appState.folder {
+                    Text("Not in “\(folder.filter.rawValue)”")
+                        .font(.caption)
+                }
+                if showName, let asset = appState.previewAsset {
+                    Text(asset.displayName)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .fixedSize()
+
+            Spacer(minLength: 8)
+
+            ZoomControls(zoomPercent: zoomPercent, zoomRequest: $zoomRequest)
+                .fixedSize()
 
             Button(action: { appState.nextPreviewImage() }) {
                 Image(systemName: "chevron.right")
+                    .frame(width: 18)
             }
-            .disabled(appState.folder.map { appState.previewIndex >= $0.filteredImages.count - 1 } ?? true)
+            .help("Next photo (→) — keeps the current photo if undecided")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.windowBackgroundColor))
+    }
+}
+
+/// Keep / Undecided / Trash segmented control reflecting (and changing) an image's decision.
+struct DecisionControl: View {
+    @EnvironmentObject var appState: AppState
+    @ObservedObject var asset: ImageAsset
+
+    var body: some View {
+        HStack(spacing: 0) {
+            segment(.kept, title: "Keep", icon: "checkmark", help: "Keep (K)")
+            segment(.unreviewed, title: "Undecided", icon: "minus", help: "Clear decision (U)")
+            segment(.trashed, title: "Trash", icon: "trash", help: "Mark for trash (⌫)")
+        }
+        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.12)))
+    }
+
+    private func segment(_ state: TriageState, title: String, icon: String, help: String) -> some View {
+        let current = asset.triageState.isDecided ? asset.triageState : .unreviewed
+        let isOn = current == state
+        return Button {
+            switch state {
+            case .kept: appState.keepPreviewImage()
+            case .trashed: appState.trashPreviewImage()
+            default: appState.clearPreviewImage()
+            }
+        } label: {
+            Label(title, systemImage: icon)
+                .font(.callout.weight(isOn ? .semibold : .regular))
+                .foregroundStyle(isOn ? (state == .unreviewed ? Color.primary : Color.white) : Color.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(isOn ? (state == .unreviewed ? Color.primary.opacity(0.15) : state.color) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(2)
+        .help(help)
+    }
+}
+
+/// Zoom percentage with fit / 100% / ± controls
+struct ZoomControls: View {
+    let zoomPercent: Int?
+    @Binding var zoomRequest: ZoomRequest
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button { zoomRequest.send(.zoomOut) } label: { Image(systemName: "minus.magnifyingglass") }
+                .buttonStyle(.borderless)
+                .help("Zoom out (−)")
+            Menu {
+                Button("Fit to Window") { zoomRequest.send(.fit) }
+                Button("Actual Size (100%)") { zoomRequest.send(.actualSize) }
+            } label: {
+                Text(zoomPercent.map { "\($0)%" } ?? "Fit")
+                    .font(.caption.monospacedDigit())
+                    .frame(minWidth: 38)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Space: fit · Z: 100% · double-click to toggle")
+            Button { zoomRequest.send(.zoomIn) } label: { Image(systemName: "plus.magnifyingglass") }
+                .buttonStyle(.borderless)
+                .help("Zoom in (+)")
+        }
+    }
+}
+
+// MARK: - Shared toolbar controls
+
+/// Toolbar button that shows a label when there is room and just the icon when compact.
+struct ToolbarButton: View {
+    let title: String
+    let systemImage: String
+    var compact: Bool = false
+    var help: String? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            if compact {
+                Image(systemName: systemImage)
+                    .frame(minWidth: 16)
+            } else {
+                Label(title, systemImage: systemImage)
+            }
+        }
+        .help(help ?? title)
+        .accessibilityLabel(title)
+        .fixedSize()
+    }
+}
+
+/// Icon button that renders filled + tinted while its option is on.
+struct ToggleIconButton: View {
+    let isOn: Bool
+    let systemImage: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .symbolVariant(isOn ? .fill : .none)
+                .foregroundStyle(isOn ? Color.accentColor : Color.primary)
+                .frame(minWidth: 16)
+        }
+        .help(help)
+        .fixedSize()
     }
 }

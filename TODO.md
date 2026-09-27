@@ -21,7 +21,7 @@
 - [x] 16. Targeted thumbnail reload: `ImageAsset.thumbnailVersion` incremented on every file edit; `GalleryThumbnail` uses it as `.task(id:)` so only the edited image reloads
 
 ## Phase 3: Preview Mode
-- [x] 17. `ZoomableImageView` — pan, zoom (scroll/pinch), fit-to-window; `reloadToken` + `resetZoomToken` parameters
+- [x] 17. `ZoomableImageView` — pan, zoom (scroll/pinch), fit-to-window; `reloadToken` + `ZoomRequest` commands
 - [x] 18. Image navigation (← →)
 - [x] 19. 90° rotation baked to file immediately (`CropService.applyRotation`); original backed up first; undoable
 - [x] 20. Crop overlay: free-form drag handles, aspect ratio presets, inside-crop rule-of-thirds grid
@@ -69,19 +69,34 @@
 - [x] 56. Settings panel (configurable shortcuts, ⌘,); reset-to-defaults button
 - [x] 57. Resume from last position on folder reopen (offer resume dialog)
 - [x] 58. Progress statistics: reviewed/total, kept/trashed/favorites shown in toolbar
-- [x] 59. Unit tests: DHash, ColorHistogram, CropService, SentinelState, ImageFolder, SimilarityEngine, ProgressStore, KeyBindings (84 tests total)
+- [x] 59. Unit tests: DHash, ColorHistogram, CropService, SentinelState, ImageFolder, SimilarityEngine, ProgressStore, KeyBindings (84 tests at the time; see Phase 7)
 - [x] 60. EXIF/detail panel timestamps include seconds (`.timeStyle = .medium`)
 - [x] 61. Undo/redo for file edits (crop, 90° rotation): undo restores from `.photo-triage-originals/` backup; redo reapplies operation
 - [x] 62. Edits preserve original EXIF/TIFF/GPS metadata: `CropService.writeJPEG` copies metadata from the pristine backup via `CGImageDestination`, resets orientation, bumps modify time, keeps capture date, restores the original's filesystem creation date (modification date stays "now"), and stamps `Software`/`UserComment` (replaces the old `NSBitmapImageRep` path that dropped all metadata)
 
+## Phase 7: Polish pass
+- [x] 63. Gallery toolbar no longer overlaps: adaptive `ViewThatFits` layouts (labels → icons → filter menu), all controls `fixedSize`; statistics moved to a bottom status bar with progress, counts, analysis progress and thumbnail-size slider
+- [x] 64. Decision status everywhere: thumbnail badges (one per corner, trashed thumbnails dimmed), status pill + Keep · Undecided · Trash control in Preview, status pill on both Triage panes, decision control in the detail panel
+- [x] 65. Preview ←/→ auto-keeps the photo being left if undecided (undoable; undo navigates back); navigation under a filter never skips a photo
+- [x] 66. Triage shows reviewed photos: anchor navigation walks every photo (kept and trashed included); entering Triage starts from the current photo; completion screen past the last photo
+- [x] 67. New tone engine (`ToneMapper` → 3D LUT): exposure with highlight shoulder, colour-preserving monotonic shadows/highlights, S-curve contrast, midtone brightness, Lightroom-direction whites/blacks, temperature/tint/vibrance; wide-gamut safe; v1 sidecar migration
+- [x] 68. Edit sidebar: live histogram with clip indicators, clipping overlay on the adjusted preview, −100…+100 sliders with double-click reset and per-section reset; edit preview renders are cancellable (no stale results) and reuse a shared `CIContext`
+- [x] 69. Exact undo: decisions restore previous state (not "unreviewed"); file edits use before/after snapshots (`EditHistory`) so undo returns to the previous version; Restore Original is undoable; undo labels in menu/tooltips
+- [x] 70. `ImagePipeline`: off-main decoding, thumbnail/screen/full tiers, caching, neighbour prefetch, cache invalidation on edit (also fixes stale clipping masks after edits)
+- [x] 71. Real zoom: double-click / Z toggles true 100%, zoom around the pointer, mouse-wheel zoom, trackpad pan, +/− keys, zoom % indicator, pan clamping; full resolution loaded on demand; synced zoom in Triage (toggle)
+- [x] 72. Keyboard: K keep, U clear, ⌫ trash in Gallery too, ↑/↓ by row, Return/Space open Preview, Esc leaves Triage; "+" works with Shift; shortcuts ignore the Settings window and text fields; edit mode blocks navigation keys instead of discarding the edit
+- [x] 73. Gallery context menu, Show in Finder, reopen last folder at launch, persisted layout preferences, toasts for actions, auto-dismissing error banner, Empty Trash confirmation from every entry point (toolbar, menu, ⌘⌫), better empty states
+- [x] 74. EXIF read during the folder scan so the date sort is correct immediately; date sort tie-broken by filename (descending sort was not a strict ordering)
+- [x] 75. Removed unreferenced stubs (`ImageLoader`, `RAWDecoder`, `UndoService`, `RotationControls`, `ImageRenderer`)
+- [x] 76. Unit tests: 150 total (AppState behaviour, ToneMapper, EditHistory, ImagePipeline/Histogram/clipping, KeyEventMatcher, sorting); UI test stubs for the new behaviour
+
 ## Remaining / Not Yet Implemented
-- [ ] Window state persistence (size, position, last-opened folder path)
-- [ ] Handle edge cases: empty folder, all images reviewed, single image, RAW-only folder with no JPEGs (display gracefully)
+- [ ] Window size/position persistence (last-opened folder is now remembered)
 - [ ] Performance testing with 1000+ image folders
 - [ ] App icon + menu bar polish
-- [ ] UI tests — currently stubbed with XCTSkip; need test image fixture set
+- [ ] UI tests — currently stubbed with XCTSkip; need test image fixture set and a UI test target
 - [ ] Keyboard handler: verify arrow key focus without requiring a prior click (local event monitor is in place; needs hardware testing)
-- [ ] `ImageLoader.swift` / `RAWDecoder.swift` / `UndoService.swift` / `RotationControls.swift` — currently unreferenced stubs; wire up or delete
-- [ ] Thumbnail disk cache (`ImageLoader` already has the `.photo-triage-thumbs/` logic; not yet used by UI)
+- [ ] Thumbnail disk cache (in-memory cache via `ImagePipeline` exists)
 - [ ] Crop custom ratio input (free-form text entry; presets implemented, custom entry is not)
 - [ ] Multi-select in gallery (⌘-click, shift-click)
+- [ ] Local (spatially adaptive) shadows/highlights — the current curves are global, which avoids halos but can flatten local contrast at extreme settings

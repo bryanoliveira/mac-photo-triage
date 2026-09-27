@@ -5,17 +5,14 @@ struct TriageView: View {
     @EnvironmentObject var appState: AppState
 
     @State private var dividerPosition: CGFloat = 0.5
-    @State private var leftScale: CGFloat = 1.0
-    @State private var rightScale: CGFloat = 1.0
-    @State private var leftOffset: CGSize = .zero
-    @State private var rightOffset: CGSize = .zero
-    @State private var leftFitToWindow = true
-    @State private var rightFitToWindow = true
+    @State private var leftZoom = ZoomState.fit
+    @State private var rightZoom = ZoomState.fit
+    @State private var zoomRequest = ZoomRequest()
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
             TriageToolbar()
+            Divider()
 
             // Main comparison area
             GeometryReader { geometry in
@@ -24,33 +21,45 @@ struct TriageView: View {
                     ComparisonPane(
                         asset: appState.triageAnchor,
                         side: .left,
-                        scale: $leftScale,
-                        offset: $leftOffset,
-                        isFitToWindow: $leftFitToWindow
+                        zoom: $leftZoom,
+                        request: zoomRequest,
+                        candidateInfo: nil
                     )
-                    .frame(width: geometry.size.width * dividerPosition)
+                    .frame(width: max(0, geometry.size.width * dividerPosition - 1))
 
-                    // Divider
-                    ResizableDivider(position: $dividerPosition)
+                    ResizableDivider(position: $dividerPosition, totalWidth: geometry.size.width)
 
-                    // Right pane (candidate)
+                    // Right pane (candidate) — shares the left pane's zoom when synced
                     ComparisonPane(
                         asset: appState.triageCandidate,
                         side: .right,
-                        scale: $rightScale,
-                        offset: $rightOffset,
-                        isFitToWindow: $rightFitToWindow
+                        zoom: appState.syncTriageZoom ? $leftZoom : $rightZoom,
+                        request: zoomRequest,
+                        candidateInfo: appState.currentCandidateInfo
                     )
-                    .frame(width: geometry.size.width * (1 - dividerPosition))
+                    .frame(width: max(0, geometry.size.width * (1 - dividerPosition) - 1))
                 }
             }
             .background(Color.black)
+            .overlay {
+                if appState.triageFinished {
+                    ZStack {
+                        Color.black.opacity(0.55)
+                        TriageCompleteView()
+                    }
+                    .transition(.opacity)
+                }
+            }
 
-            // Action bar
+            Divider()
             TriageControls()
         }
+        .animation(.easeInOut(duration: 0.2), value: appState.triageFinished)
         .focusedKeyboardHandler { action in
             handleKeyAction(action)
+        }
+        .onChange(of: appState.syncTriageZoom) { _, synced in
+            if synced { rightZoom = leftZoom }
         }
     }
 
@@ -58,239 +67,212 @@ struct TriageView: View {
         switch action {
         case .keepLeft:
             appState.keepLeft()
-            return true
         case .keepRight:
             appState.keepRight()
-            return true
         case .keepBoth:
             appState.keepBoth()
-            return true
         case .keepNone:
             appState.keepNone()
-            return true
         case .navigateLeft:
             appState.previousTriageAnchor()
-            return true
         case .navigateRight:
             appState.nextTriageAnchor()
-            return true
         case .candidateUp:
             appState.previousCandidate()
-            return true
         case .candidateDown:
             appState.nextCandidate()
-            return true
         case .toggleZoom:
-            toggleZoom()
-            return true
+            zoomRequest.send(.fit)
+        case .zoomActualSize:
+            zoomRequest.send(leftZoom.isFit ? .actualSize : .fit)
+        case .gridIncrease:
+            zoomRequest.send(.zoomIn)
+        case .gridDecrease:
+            zoomRequest.send(.zoomOut)
         case .toggleEXIF:
             appState.showEXIFOverlay.toggle()
-            return true
         case .toggleClipping:
             appState.showClippingWarnings.toggle()
-            return true
         case .toggleGrid:
             appState.showGuidingGrid.toggle()
-            return true
         case .swapPair:
             appState.swapTriagePair()
-            return true
-        case .switchToGallery:
-            appState.showGallery()
-            return true
+        case .switchToGallery, .cancelCrop:
+            if appState.triageFinished {
+                appState.triageFinished = false
+            } else {
+                appState.showGallery()
+            }
         case .toggleFavorite:
             if let anchor = appState.triageAnchor {
                 appState.toggleFavorite(on: anchor)
             }
-            return true
         case .openLeftPreview:
             if let anchor = appState.triageAnchor {
                 appState.showPreview(for: anchor)
             }
-            return true
         case .openRightPreview:
             if let candidate = appState.triageCandidate {
                 appState.showPreview(for: candidate)
             }
-            return true
         case .undo:
             appState.undo()
-            return true
         case .redo:
             appState.redo()
-            return true
+        case .emptyTrash:
+            appState.requestEmptyTrash()
         default:
             return false
         }
-    }
-
-    private func toggleZoom() {
-        leftFitToWindow.toggle()
-        rightFitToWindow.toggle()
-        if leftFitToWindow {
-            leftScale = 1.0
-            leftOffset = .zero
-            rightScale = 1.0
-            rightOffset = .zero
-        }
+        return true
     }
 }
 
-/// Triage toolbar with navigation and status
+/// Triage toolbar with navigation and status. Collapses to icons on narrow windows.
 struct TriageToolbar: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        HStack {
-            // Back button
-            Button(action: { appState.showGallery() }) {
-                Label("Gallery", systemImage: "square.grid.2x2")
-            }
+        ViewThatFits(in: .horizontal) {
+            row(compact: false)
+            row(compact: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
 
-            Divider()
-                .frame(height: 20)
+    private func row(compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            ToolbarButton(title: "Gallery", systemImage: "square.grid.2x2", compact: compact,
+                          help: "Back to Gallery (G)") { appState.showGallery() }
 
-            // Progress indicator
-            if let folder = appState.folder {
-                let stats = folder.statistics
-                Text("\(stats.reviewed)/\(stats.total) reviewed")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            Divider().frame(height: 18)
 
-                ProgressView(value: stats.progress)
-                    .frame(width: 100)
-            }
-
-            Spacer()
-
-            // Navigation
+            // Anchor navigation + position
             HStack(spacing: 4) {
                 Button(action: { appState.previousTriageAnchor() }) {
                     Image(systemName: "chevron.left")
                 }
-                .help("Previous (Left Arrow)")
-
-                Text("Anchor")
-                    .font(.caption)
+                .help("Previous photo (←)")
+                Text(anchorPositionText)
+                    .font(.caption.monospacedDigit())
                     .foregroundColor(.secondary)
-
+                    .frame(minWidth: compact ? 44 : 64)
                 Button(action: { appState.nextTriageAnchor() }) {
                     Image(systemName: "chevron.right")
                 }
-                .help("Next (Right Arrow)")
+                .help("Next photo (→) — keeps the current photo if undecided")
+            }
+            .fixedSize()
+
+            if !compact, let folder = appState.folder {
+                ProgressView(value: folder.statistics.progress)
+                    .frame(width: 70)
+                    .help(folder.statistics.progressSummary)
             }
 
-            Divider()
-                .frame(height: 20)
+            Spacer(minLength: 8)
 
+            // Candidate navigation
             HStack(spacing: 4) {
                 Button(action: { appState.previousCandidate() }) {
                     Image(systemName: "chevron.up")
                 }
-                .help("Previous Candidate (Up Arrow)")
-
-                Text("Candidate")
-                    .font(.caption)
+                .help("Previous candidate (↑)")
+                .disabled(appState.candidateIndex == 0)
+                Text(candidatePositionText(compact: compact))
+                    .font(.caption.monospacedDigit())
                     .foregroundColor(.secondary)
-
+                    .frame(minWidth: compact ? 36 : 90)
                 Button(action: { appState.nextCandidate() }) {
                     Image(systemName: "chevron.down")
                 }
-                .help("Next Candidate (Down Arrow)")
+                .help("Next candidate (↓)")
+                .disabled(appState.candidateIndex >= appState.candidateCount - 1)
             }
+            .fixedSize()
 
-            Divider()
-                .frame(height: 20)
+            ToolbarButton(title: "Swap", systemImage: "arrow.left.arrow.right", compact: true,
+                          help: "Swap anchor and candidate (S)") { appState.swapTriagePair() }
+                .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
 
-            // Swap anchor ↔ candidate
-            Button(action: { appState.swapTriagePair() }) {
-                Image(systemName: "arrow.left.arrow.right")
-            }
-            .help("Swap anchor and candidate (S)")
-            .disabled(appState.triageAnchor == nil || appState.triageCandidate == nil)
-
-            Divider()
-                .frame(height: 20)
-
-            // Candidate filter
-            Picker("", selection: Binding(
-                get: { appState.candidateFilter },
-                set: { appState.candidateFilter = $0 }
-            )) {
+            Picker("Candidates", selection: $appState.candidateFilter) {
                 ForEach(CandidateFilter.allCases) { filter in
                     Text(filter.rawValue).tag(filter)
                 }
             }
             .pickerStyle(.menu)
-            .frame(width: 100)
-            .help("Candidate filter: All shows every image; Strict shows near-duplicates only")
+            .labelsHidden()
+            .fixedSize()
+            .help("Which photos can appear as candidates: All shows every photo; Strict shows near-duplicates only")
 
-            Divider()
-                .frame(height: 20)
+            AnalysisIndicator()
 
-            // EXIF toggle
-            Button(action: { appState.showEXIFOverlay.toggle() }) {
-                Image(systemName: appState.showEXIFOverlay ? "info.circle.fill" : "info.circle")
+            Divider().frame(height: 18)
+
+            ToggleIconButton(isOn: appState.syncTriageZoom, systemImage: "link",
+                             help: "Zoom and pan both photos together") { appState.syncTriageZoom.toggle() }
+            ToggleIconButton(isOn: appState.showEXIFOverlay, systemImage: "info.circle",
+                             help: "Photo info (I)") { appState.showEXIFOverlay.toggle() }
+            ToggleIconButton(isOn: appState.showGuidingGrid, systemImage: "grid",
+                             help: "Guiding grid (H)") { appState.showGuidingGrid.toggle() }
+            ToggleIconButton(isOn: appState.showClippingWarnings, systemImage: "exclamationmark.triangle",
+                             help: "Clipping warnings — red: blown highlights, blue: crushed shadows (W)") {
+                appState.showClippingWarnings.toggle()
             }
-            .help("Toggle EXIF (I)")
 
-            // Guiding grid toggle
-            Button(action: { appState.showGuidingGrid.toggle() }) {
-                Image(systemName: appState.showGuidingGrid ? "grid" : "grid")
-                    .foregroundStyle(appState.showGuidingGrid ? .blue : .primary)
-            }
-            .help("Toggle guiding grid — rule of thirds + center crosshair (H)")
+            Divider().frame(height: 18)
 
-            // Clipping warnings toggle
-            Button(action: { appState.showClippingWarnings.toggle() }) {
-                Image(systemName: appState.showClippingWarnings
-                    ? "exclamationmark.triangle.fill"
-                    : "exclamationmark.triangle")
-                .foregroundStyle(appState.showClippingWarnings ? .yellow : .primary)
-            }
-            .help("Toggle Clipping Warnings — red: blown highlights, blue: crushed shadows (W)")
-
-            // Undo/Redo
-            Button(action: { appState.undo() }) {
-                Image(systemName: "arrow.uturn.backward")
-            }
-            .disabled(!appState.canUndo)
-            .help("Undo (Cmd+Z)")
-
-            Button(action: { appState.redo() }) {
-                Image(systemName: "arrow.uturn.forward")
-            }
-            .disabled(!appState.canRedo)
-            .help("Redo (Cmd+Shift+Z)")
+            ToolbarButton(title: "Undo", systemImage: "arrow.uturn.backward", compact: true,
+                          help: appState.undoLabel.map { "Undo \($0) (⌘Z)" } ?? "Undo (⌘Z)") { appState.undo() }
+                .disabled(!appState.canUndo)
+            ToolbarButton(title: "Redo", systemImage: "arrow.uturn.forward", compact: true,
+                          help: appState.redoLabel.map { "Redo \($0) (⌘⇧Z)" } ?? "Redo (⌘⇧Z)") { appState.redo() }
+                .disabled(!appState.canRedo)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private var anchorPositionText: String {
+        guard let pos = appState.triagePosition else { return "—" }
+        return "\(pos.index + 1) / \(pos.count)"
+    }
+
+    private func candidatePositionText(compact: Bool) -> String {
+        let count = appState.candidateCount
+        guard count > 0, appState.triageCandidate != nil else { return compact ? "—" : "No candidates" }
+        let pos = "\(appState.candidateIndex + 1) / \(count)"
+        return compact ? pos : "Candidate \(pos)"
     }
 }
 
 /// Resizable divider between panes
 struct ResizableDivider: View {
     @Binding var position: CGFloat
+    let totalWidth: CGFloat
 
     @State private var isDragging = false
+    @State private var startPosition: CGFloat?
 
     var body: some View {
         Rectangle()
-            .fill(Color.gray.opacity(0.3))
-            .frame(width: isDragging ? 4 : 2)
-            .contentShape(Rectangle().inset(by: -4))
+            .fill(isDragging ? Color.accentColor : Color.gray.opacity(0.35))
+            .frame(width: 2)
+            .contentShape(Rectangle().inset(by: -5))
             .gesture(
-                DragGesture()
+                DragGesture(coordinateSpace: .global)
                     .onChanged { value in
                         isDragging = true
-                        let newPosition = position + value.translation.width / 1000
-                        position = max(0.2, min(0.8, newPosition))
+                        if startPosition == nil { startPosition = position }
+                        guard totalWidth > 0, let start = startPosition else { return }
+                        position = max(0.2, min(0.8, start + value.translation.width / totalWidth))
                     }
                     .onEnded { _ in
                         isDragging = false
+                        startPosition = nil
                     }
             )
+            .onTapGesture(count: 2) { position = 0.5 }
             .onHover { hovering in
                 if hovering {
                     NSCursor.resizeLeftRight.push()
@@ -298,5 +280,6 @@ struct ResizableDivider: View {
                     NSCursor.pop()
                 }
             }
+            .help("Drag to resize · double-click to reset")
     }
 }

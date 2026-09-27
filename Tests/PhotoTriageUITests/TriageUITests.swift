@@ -142,4 +142,21 @@ final class TriageUITests: XCTestCase {
         // Toolbar clipping button is present and reflects active state.
         throw XCTSkip("Requires a test folder with images")
     }
+
+    // MARK: - Reviewed images & completion
+
+    func testArrowNavigationIncludesReviewedPhotos() throws {
+        // → steps onto kept and trashed photos instead of skipping them
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testCompletionScreenAfterLastPhoto() throws {
+        // → past the last photo shows the completion card; ← dismisses it
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testSyncZoomLinksPanes() throws {
+        // With the link toggle on, zooming one pane zooms the other
+        throw XCTSkip("Requires a test folder with images")
+    }
 }

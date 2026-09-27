@@ -10,25 +10,14 @@ struct DetailPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Preview thumbnail
                 thumbnailSection
-
+                decisionSection
                 Divider()
-
-                // File info
                 fileInfoSection
-
                 Divider()
-
-                // EXIF metadata
                 exifSection
-
                 Divider()
-
-                // Actions
                 actionsSection
-
-                Spacer()
             }
             .padding()
         }
@@ -44,34 +33,54 @@ struct DetailPanel: View {
     // MARK: - Sections
 
     private var thumbnailSection: some View {
-        VStack {
-            AsyncThumbnail(url: asset.displayURL, size: 200, reloadToken: asset.thumbnailVersion)
-                .cornerRadius(8)
+        VStack(alignment: .leading, spacing: 10) {
+            AsyncThumbnail(url: asset.displayURL, size: 240, reloadToken: asset.thumbnailVersion)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(maxWidth: .infinity)
+                .onTapGesture(count: 2) { appState.showPreview(for: asset) }
+                .help("Double-click to open in Preview")
 
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
                 Text(asset.displayName)
                     .font(.headline)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
 
                 Spacer()
 
-                FavoriteButton(asset: asset) {
+                FavoriteButton(asset: asset, size: .small) {
                     appState.toggleFavorite(on: asset)
                 }
             }
+        }
+    }
 
-            // State indicator
+    /// Keep / Trash / Clear as a single segmented control that also shows the current state
+    private var decisionSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(asset.sentinelState.stateDescription)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
+                DecisionBadge(asset: asset, style: .pill, showUnreviewed: true)
                 Spacer()
-
                 Text(asset.typeIndicator)
-                    .font(.caption)
+                    .font(.caption.weight(.medium))
                     .foregroundColor(.secondary)
             }
+
+            Picker("Decision", selection: Binding(
+                get: { asset.triageState.isDecided ? asset.triageState : .unreviewed },
+                set: { newValue in
+                    let label = newValue == .kept ? "Keep" : newValue == .trashed ? "Trash" : "Clear Decision"
+                    appState.setState(newValue, on: asset, label: label)
+                }
+            )) {
+                Label("Keep", systemImage: "checkmark").tag(TriageState.kept)
+                Label("Undecided", systemImage: "minus").tag(TriageState.unreviewed)
+                Label("Trash", systemImage: "trash").tag(TriageState.trashed)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .help("Keep (K) · Clear (U) · Trash (⌫)")
         }
     }
 
@@ -80,12 +89,11 @@ struct DetailPanel: View {
             Text("File Info")
                 .font(.subheadline.bold())
 
-            InfoRow(label: "Name", value: asset.displayName)
             InfoRow(label: "Type", value: asset.typeIndicator)
 
             if let metadata = asset.exifMetadata {
                 if let width = metadata.imageWidth, let height = metadata.imageHeight {
-                    InfoRow(label: "Dimensions", value: "\(width) x \(height)")
+                    InfoRow(label: "Dimensions", value: "\(width) × \(height)")
                 }
             }
 
@@ -94,66 +102,61 @@ struct DetailPanel: View {
                let size = attrs[.size] as? Int64 {
                 InfoRow(label: "Size", value: formatFileSize(size))
             }
+
+            if hasOriginalBackup {
+                InfoRow(label: "Edited", value: "Original backed up")
+            }
         }
     }
 
     private var exifSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("EXIF Data")
+            Text("Camera")
                 .font(.subheadline.bold())
 
             if let metadata = asset.exifMetadata {
-                if let camera = metadata.cameraString {
-                    InfoRow(label: "Camera", value: camera)
-                }
-
-                if let lens = metadata.lensString {
-                    InfoRow(label: "Lens", value: lens)
-                }
-
-                if let focal = metadata.focalLengthString {
-                    InfoRow(label: "Focal Length", value: focal)
-                }
-
-                if let aperture = metadata.apertureString {
-                    InfoRow(label: "Aperture", value: aperture)
-                }
-
-                if let shutter = metadata.shutterSpeed {
-                    InfoRow(label: "Shutter", value: shutter)
-                }
-
-                if let iso = metadata.isoString {
-                    InfoRow(label: "ISO", value: iso)
-                }
-
-                if let date = metadata.captureDate {
-                    InfoRow(label: "Date", value: formatDate(date))
+                if metadata.hasAnyData {
+                    if let camera = metadata.cameraString {
+                        InfoRow(label: "Camera", value: camera)
+                    }
+                    if let lens = metadata.lensString {
+                        InfoRow(label: "Lens", value: lens)
+                    }
+                    if !metadata.summaryString.isEmpty {
+                        InfoRow(label: "Exposure", value: metadata.summaryString)
+                    }
+                    if let ev = metadata.exposureCompensationString {
+                        InfoRow(label: "Comp.", value: ev)
+                    }
+                    if let date = metadata.captureDate {
+                        InfoRow(label: "Taken", value: formatDate(date))
+                    }
+                } else {
+                    Text("No EXIF metadata")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             } else {
-                Text("Loading...")
+                Text("Loading…")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .task {
-                        asset.exifMetadata = EXIFReader.read(from: asset.displayURL)
+                        let url = asset.displayURL
+                        asset.exifMetadata = await Task.detached { EXIFReader.read(from: url) }.value
                     }
             }
         }
     }
 
     private var actionsSection: some View {
-        VStack(spacing: 12) {
-            Text("Actions")
-                .font(.subheadline.bold())
-                .frame(maxWidth: .infinity, alignment: .leading)
-
+        VStack(spacing: 8) {
             Button(action: {
                 appState.showPreview(for: asset)
             }) {
                 Label("Open in Preview", systemImage: "eye")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
+            .controlSize(.large)
 
             Button(action: {
                 appState.showTriage(from: asset)
@@ -161,64 +164,25 @@ struct DetailPanel: View {
                 Label("Start Triage Here", systemImage: "square.split.2x1")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
-
-            Divider()
-
-            HStack(spacing: 12) {
-                Button(action: {
-                    try? asset.markKept()
-                }) {
-                    Label("Keep", systemImage: "checkmark.circle")
-                }
-                .buttonStyle(.bordered)
-                .tint(.green)
-                .disabled(asset.isKept)
-
-                Button(action: {
-                    try? asset.markTrashed()
-                }) {
-                    Label("Trash", systemImage: "trash")
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .disabled(asset.isTrashed)
-            }
-
-            if asset.isReviewed {
-                Button(action: {
-                    try? asset.clearTriageState()
-                }) {
-                    Label("Clear State", systemImage: "arrow.uturn.backward")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
+            .controlSize(.large)
 
             if hasOriginalBackup {
-                Divider()
-
-                Button(action: restoreOriginal) {
+                Button(action: { Task { await appState.restoreOriginal(asset) } }) {
                     Label("Restore Original", systemImage: "arrow.counterclockwise")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .help("Replace the current file with the unedited original")
+                .controlSize(.large)
+                .help("Replace the edited file with the unedited original (undoable)")
             }
-        }
-    }
 
-    private func restoreOriginal() {
-        Task {
-            let service = CropService()
-            do {
-                try await service.restoreOriginal(for: asset.displayURL)
-                appState.cropVersion += 1
-                asset.thumbnailVersion += 1
-                hasOriginalBackup = false
-            } catch {
-                appState.errorMessage = error.localizedDescription
+            Button(action: {
+                NSWorkspace.shared.activateFileViewerSelecting([asset.displayURL])
+            }) {
+                Label("Show in Finder", systemImage: "folder")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderless)
+            .padding(.top, 4)
         }
     }
 
@@ -244,17 +208,18 @@ struct InfoRow: View {
     let value: String
 
     var body: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label)
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .frame(width: 80, alignment: .leading)
+                .frame(width: 72, alignment: .leading)
 
             Text(value)
                 .font(.caption)
-                .lineLimit(1)
+                .lineLimit(2)
+                .textSelection(.enabled)
 
-            Spacer()
+            Spacer(minLength: 0)
         }
     }
 }

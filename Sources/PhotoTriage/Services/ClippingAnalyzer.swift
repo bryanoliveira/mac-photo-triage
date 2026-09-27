@@ -7,9 +7,9 @@ import ImageIO
 actor ClippingAnalyzer {
     static let shared = ClippingAnalyzer()
 
-    struct ClippingMasks {
-        let highlights: NSImage  // red pixels where channels >= highlightThreshold
-        let shadows: NSImage     // blue pixels where channels <= shadowThreshold
+    struct ClippingMasks: @unchecked Sendable {
+        let highlights: NSImage  // red pixels where any channel >= highlightThreshold
+        let shadows: NSImage     // blue pixels where every channel <= shadowThreshold
     }
 
     private var cache: [URL: ClippingMasks] = [:]
@@ -33,8 +33,8 @@ actor ClippingAnalyzer {
 
     // MARK: - Background computation
 
-    private static let highlightThreshold: UInt8 = 252
-    private static let shadowThreshold: UInt8 = 3
+    static let highlightThreshold: UInt8 = 252
+    static let shadowThreshold: UInt8 = 3
 
     private static func buildMasks(url: URL) -> ClippingMasks? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
@@ -49,7 +49,14 @@ actor ClippingAnalyzer {
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else {
             return nil
         }
+        return buildMasks(from: cgImage)
+    }
 
+    /// Build clipping masks for an in-memory image (used for the live Edit-mode preview).
+    /// Highlights: **any** channel ≥ 252 (a single blown channel already loses detail, e.g. a
+    /// red flower or sunset). Shadows: **all** channels ≤ 3 (true crushed black — a single
+    /// channel at 0 is normal for saturated colours).
+    nonisolated static func buildMasks(from cgImage: CGImage) -> ClippingMasks? {
         let w = cgImage.width, h = cgImage.height
         guard w > 0, h > 0 else { return nil }
 
@@ -73,10 +80,11 @@ actor ClippingAnalyzer {
             let p = i * 4
             let r = src[p], g = src[p + 1], b = src[p + 2], a = src[p + 3]
             guard a > 0 else { continue }
+            let hi = max(r, g, b)
 
-            if r >= highlightThreshold && g >= highlightThreshold && b >= highlightThreshold {
+            if hi >= highlightThreshold {
                 hBuf[p] = 255; hBuf[p + 3] = 255          // solid red
-            } else if r <= shadowThreshold && g <= shadowThreshold && b <= shadowThreshold {
+            } else if hi <= shadowThreshold {
                 sBuf[p + 2] = 255; sBuf[p + 3] = 255      // solid blue
             }
         }
@@ -93,7 +101,7 @@ actor ClippingAnalyzer {
         )
     }
 
-    private static func makeCGImage(bytes: [UInt8], width: Int, height: Int, colorSpace: CGColorSpace) -> CGImage? {
+    private nonisolated static func makeCGImage(bytes: [UInt8], width: Int, height: Int, colorSpace: CGColorSpace) -> CGImage? {
         let data = Data(bytes)
         guard let provider = CGDataProvider(data: data as CFData) else { return nil }
         return CGImage(

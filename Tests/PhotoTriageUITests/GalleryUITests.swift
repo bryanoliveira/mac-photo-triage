@@ -74,4 +74,21 @@ final class GalleryUITests: XCTestCase {
     func testKeyboardNavigationInGallery() throws {
         throw XCTSkip("Requires a test folder with images")
     }
+
+    // MARK: - Toolbar layout & culling
+
+    func testToolbarNeverOverlapsAtMinimumWidth() throws {
+        // At 820pt with the detail panel open the toolbar collapses to icons, no overlap
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testKeyboardCulling() throws {
+        // K / ⌫ / U set the decision on the selection and advance; ↑/↓ move by a row
+        throw XCTSkip("Requires a test folder with images")
+    }
+
+    func testContextMenuActions() throws {
+        // Right-click offers Preview, Triage, Keep, Trash, Clear, Favorite, Show in Finder
+        throw XCTSkip("Requires a test folder with images")
+    }
 }

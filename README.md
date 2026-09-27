@@ -2,9 +2,9 @@
 
 A native macOS app for fast, offline triage of DSLR photo folders. Browse a gallery, review images side-by-side against their closest match, and cull duplicates/near-duplicates — all backed by plain files on disk, with no cloud, database lock-in, or ML models.
 
-- **Gallery** — resizable thumbnail grid with filters, sort, and a detail sidebar
-- **Preview** — full-resolution single-image view with crop, horizon straightening, and 90° rotation baked to disk
-- **Triage** — side-by-side comparison against the most similar remaining image, with one-key keep/trash decisions
+- **Gallery** — resizable thumbnail grid with filters, sort, keyboard culling and a detail sidebar
+- **Preview** — single-photo view that always shows whether the photo is kept or trashed; arrow keys keep as you go; true 100% zoom; crop, straightening, tone/colour adjustments (with a live histogram) and 90° rotation baked to disk
+- **Triage** — side-by-side comparison against the most similar image, with one-key keep/trash decisions; walks every photo, including ones you've already reviewed
 
 State (`.keep` / `.trash` / `.favorite` / `.reviewed`) is stored as zero-byte sentinel files next to each photo, so it's inspectable and portable without opening the app. See [REQUIREMENTS.md](REQUIREMENTS.md) for the full feature spec and [ARCHITECTURE.md](ARCHITECTURE.md) for how it's implemented.
 
@@ -37,15 +37,17 @@ On first launch, open a folder (⌘O) containing JPEGs and/or RAW files. The app
 
 ### Gallery
 
-The default view. Click a thumbnail to select it and open the detail sidebar (file info, EXIF summary, favorite toggle, keep/trash actions, and **Restore Original** for edited images). Use the filter bar (All / Kept / Trashed / Favorites) and sort picker to navigate large folders, and `+`/`-` to resize the grid.
+The default view. Click a thumbnail to select it and open the detail sidebar (decision control, file info, EXIF summary, favorite toggle, and **Restore Original** for edited images). Badges show each photo's decision; trashed photos are dimmed. Cull straight from the grid with `K` (keep), `⌫` (trash) and `U` (clear) — the selection advances — or right-click for more. Use the filter (All / Unreviewed / Kept / Trashed / Favorites) and sort menu to navigate large folders, and `+`/`-` (or the status-bar slider) to resize the grid.
 
 ### Preview
 
-Opens a single image at full resolution. Rotate 90° (⌘←/⌘→ — baked to the JPEG immediately) or enter crop mode to drag a crop rect, straighten the horizon (±15° slider), and apply aspect-ratio presets. Clipping warnings (`W`) flash blown highlights/crushed shadows; the guiding grid (`H`) overlays rule-of-thirds. All edits back up the original to `.photo-triage-originals/` on first touch, so **Restore Original** and undo (⌘Z) always work.
+Opens a single photo. A pill on the photo and the Keep · Undecided · Trash control in the bottom bar show its decision. Stepping with `←`/`→` marks the photo you leave as **kept** unless you already decided (`K` keep, `⌫` trash, `U` clear). Double-click or `Z` for true 100% zoom, scroll or pinch to zoom around the pointer, `Space` to fit.
+
+Rotate 90° (⌘←/⌘→ — baked to the JPEG immediately) or press **Edit** (Return) to crop, straighten (±15°) and adjust Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Brightness, Temperature, Tint, Vibrance and Saturation while watching a live histogram. Exposure rolls highlights off instead of clipping, and Shadows/Highlights preserve colour. Clipping warnings (`W`) flash blown highlights/crushed shadows (on the adjusted image while editing); the guiding grid (`H`) overlays rule-of-thirds. All edits back up the original to `.photo-triage-originals/` on first touch; undo (⌘Z) steps back one edit at a time and **Restore Original** is always available.
 
 ### Triage
 
-Shows your current image (anchor, left) next to its best-matching candidate (right), ranked by a weighted score of perceptual hash, color histogram, capture time, and aspect ratio. Decide with `L` (keep left) / `R` (keep right) / `B` (keep both) / `N` (trash both) / `S` (swap for comparison only). The candidate filter picker (All/Loose/Moderate/Strict) controls how similar a candidate must be to surface.
+Shows your current image (anchor, left) next to its best-matching candidate (right, with a match %), ranked by a weighted score of perceptual hash, color histogram, capture time, and aspect ratio. Decide with `L` (keep left) / `R` (keep right) / `B` (keep both) / `N` (trash both) / `S` (swap for comparison only). `←`/`→` step through **every** photo, including ones already kept or trashed, and each pane shows its status. Zoom is synced between panes by default (link button) for comparing focus. The candidate filter picker (All/Loose/Moderate/Strict) controls how similar a candidate must be to surface.
 
 ### Keyboard Shortcuts
 
@@ -53,7 +55,7 @@ All shortcuts are rebindable in Preferences (⌘,). See [REQUIREMENTS.md § Keyb
 
 ### Trash
 
-Trash is soft: triage decisions and `Delete` in Preview only mark files with a `.trash` sentinel — nothing touches disk yet. Nothing is actually deleted until you run **Empty Trash** (⌘⌫), which moves marked files (and their RAW/JPEG partner) to the macOS Trash via `NSWorkspace`, so they're always recoverable from Trash afterward.
+Trash is soft: triage decisions and `Delete` in Preview only mark files with a `.trash` sentinel — nothing touches disk yet. Nothing is actually deleted until you run **Empty Trash** (⌘⌫, always confirmed), which moves marked files (and their RAW/JPEG partner) to the macOS Trash via `NSWorkspace`, so they're always recoverable from Trash afterward.
 
 ## Project Layout
 
@@ -62,8 +64,8 @@ Sources/PhotoTriage/
 ├── App/         entry point, global AppState, KeyBindings
 ├── Models/      ImageAsset, ImageFolder, SimilarityEngine, HashCache, ProgressStore, SentinelState
 ├── Views/       Gallery/ Preview/ Triage/ Shared/ Settings/
-├── Services/    CropService, ClippingAnalyzer, TrashService
-└── Utilities/   DHash, ColorHistogram, EXIFReader, FileExtensions
+├── Services/    CropService, EditHistory, ImagePipeline, ClippingAnalyzer, TrashService
+└── Utilities/   DHash, ColorHistogram, Histogram, EXIFReader, FileExtensions
 Tests/
 ├── PhotoTriageTests/     unit tests (swift test)
 └── PhotoTriageUITests/   XCUITest stubs (not yet exercised — need fixture images)
@@ -87,6 +89,10 @@ A few common extension points and where to make them:
 2. Add read/write/clear logic to `ImageAsset` (mirroring the RAW partner if the state should apply to pairs, following the pattern of `markKept()`/`toggleFavorite()`).
 3. Wire up UI: a toolbar/detail-panel action to set it, and (optionally) a `CandidateFilter`-style gallery filter to query it.
 
+### Add a tone or colour slider
+
+Add a field to `ImageAdjustments` (plus its `CodingKeys` and `encode`), implement it inside `ToneMapper.map` (a pure function — add a test in `ToneMapperTests`), and add an `AdjustmentRow` to `EditSidebarPanel` in `CropOverlay.swift`. The LUT picks it up automatically for both the live preview and the saved file.
+
 ### Adjust or extend the similarity score
 
 The scoring logic lives entirely in `Sources/PhotoTriage/Models/SimilarityEngine.swift`, with the weighted formula documented in `ARCHITECTURE.md § Similarity Engine`. To add a new signal (e.g. a face-count or sharpness score):
@@ -101,7 +107,7 @@ All destructive JPEG edits go through `Sources/PhotoTriage/Services/CropService.
 
 1. Call `backupURL(for:)` / rely on the existing backup-on-first-edit behavior — never write to a file that hasn't been backed up.
 2. Funnel the pixel output through `writeJPEG(_:to:metadataFrom:editNote:)` so EXIF/TIFF/GPS metadata and the creation-date fix-up are preserved automatically.
-3. Add a matching `UndoAction` case in `AppState` (see `.cropApplied`/`.rotationApplied`) so ⌘Z/⌘⇧Z restore/reapply it, and bump `cropVersion`/`asset.thumbnailVersion` so the UI refreshes.
+3. Expose it from `AppState` through `performFileEdit(on:label:_:)` (see `rotate`/`applyEdit`/`restoreOriginal`) — that snapshots the file before and after for exact undo/redo and refreshes every cache and view of the photo.
 
 ### Add a new view/mode
 

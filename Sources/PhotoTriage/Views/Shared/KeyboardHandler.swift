@@ -45,9 +45,28 @@ struct FocusedKeyboardHandler: ViewModifier {
     }
 
     private func matches(_ binding: KeyBinding, key: String, event: NSEvent, modifiers: EventModifiers) -> Bool {
-        guard binding.eventModifiers == modifiers else { return false }
+        KeyEventMatcher.matches(binding, key: key, keyCode: event.keyCode, modifiers: modifiers)
+    }
+}
+
+/// Pure key-matching logic, separated from NSEvent so it can be unit-tested.
+enum KeyEventMatcher {
+    static func matches(_ binding: KeyBinding, key: String, keyCode: UInt16, modifiers: EventModifiers) -> Bool {
         let k = binding.key.lowercased()
-        switch event.keyCode {
+
+        // Symbols like "+" need Shift on most layouts ("=" key). A binding for a symbol without
+        // an explicit Shift should fire whether or not Shift was held, and "+" also accepts the
+        // unshifted "=" so the zoom/grid shortcut works without reaching for Shift.
+        if k.count == 1, let ch = k.first, !ch.isLetter, !ch.isNumber, !binding.eventModifiers.contains(.shift) {
+            let mods = modifiers.subtracting(.shift)
+            guard binding.eventModifiers == mods else { return false }
+            if k == "+" { return key == "+" || key == "=" }
+            if k == "-" { return key == "-" || key == "_" }
+            return key == k
+        }
+
+        guard binding.eventModifiers == modifiers else { return false }
+        switch keyCode {
         case 123 where k == "left"   || k == "leftarrow":  return true
         case 124 where k == "right"  || k == "rightarrow": return true
         case 125 where k == "down"   || k == "downarrow":  return true
@@ -92,7 +111,10 @@ struct KeyMonitorView: NSViewRepresentable {
         private func installMonitor() {
             guard monitor == nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, self.window != nil else { return event }
+                // Only handle keys aimed at our window (not Settings), and never while the user
+                // is typing into a text field.
+                guard let self, let window = self.window, event.window === window,
+                      !(window.firstResponder is NSText) else { return event }
                 return (self.handler?(event) == true) ? nil : event
             }
         }
